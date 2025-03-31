@@ -35,7 +35,25 @@ BUCKET_SECRETS = {
     "write": {
         "access_key_id": os.environ.get("R2_WRITE_ACCESS_KEY_ID"),
         "secret_access_key": os.environ.get("R2_WRITE_SECRET_ACCESS_KEY")
-    }
+    },
+    "dataset": {
+            "account_id": os.environ.get("R2_DATASET_ACCOUNT_ID"),
+            "name": os.environ.get("R2_DATASET_BUCKET_NAME"),
+            "credentials": {
+                "read": {
+                    "access_key_id": os.environ.get("R2_DATASET_READ_ACCESS_KEY_ID"),
+                    "secret_access_key": os.environ.get(
+                        "R2_DATASET_READ_SECRET_ACCESS_KEY"
+                    ),
+                },
+                "write": {
+                    "access_key_id": os.environ.get("R2_DATASET_WRITE_ACCESS_KEY_ID"),
+                    "secret_access_key": os.environ.get(
+                        "R2_DATASET_WRITE_SECRET_ACCESS_KEY"
+                    ),
+                },
+            },
+        },
 }
 
 # Validate required environment variables

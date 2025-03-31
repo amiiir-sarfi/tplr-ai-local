@@ -143,7 +143,24 @@ class CompressDCT:
         return idx, val, xshape, totalk
 
     @torch.no_grad()
-    def decompress(self, p, idx, val, xshape, totalk, median=True):
+    def decompress(self, p, idx, val, xshape, totalk):
+        x = torch.zeros(xshape, device=p.device, dtype=p.dtype)
+
+        if len(xshape) > 2:  # 2D weights
+            x = rearrange(x, "y x h w -> y x (h w)")
+
+        # TODO: Careful, this is nondeterministic across different CUDA devices! might cause errors to accumulate between nodes!
+        x.scatter_reduce_(
+            dim=-1, index=idx, src=val, reduce="mean", include_self=False
+        ).reshape(xshape)
+
+        if len(x.shape) > 2:  # 2D weights
+            x = rearrange(x, "y x (h w) -> y x h w", h=xshape[2])
+
+        return x
+
+    @torch.no_grad()
+    def decompressMed(self, p, idx, val, xshape, totalk, median=False):
         x = torch.zeros(xshape, device=p.device, dtype=p.dtype)
 
         if len(x.shape) > 2:  # 2D weights

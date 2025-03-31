@@ -231,17 +231,17 @@ class Miner:
                 seed = self.uid
             
             # Get the pages for this window.
-            pages = await tplr.dataset.DatasetLoader.next_pages(
-                offset = step_window,
-                n_pages = self.hparams.pages_per_window,
-                seed = seed
-            )            
-            loader = await tplr.dataset.DatasetLoader.create(
-                batch_size = self.hparams.batch_size,
-                sequence_length = self.hparams.sequence_length,
-                pages_info = pages,
-                tokenizer = self.tokenizer
-            )   
+            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                offset=step_window,
+                n_pages=self.hparams.pages_per_window,
+                seed=self.uid,  # type: ignore
+            )
+            loader = await tplr.r2_dataset.R2DatasetLoader.create(
+                batch_size=self.hparams.batch_size,
+                sequence_length=self.hparams.sequence_length,
+                pages_info=pages,
+                tokenizer=self.tokenizer,
+            )  
             tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}")
             
             # Accumulate gradient
@@ -353,7 +353,7 @@ class Miner:
                 timeout=5,
                 device=self.config.device,
                 local=self.config.local,
-                stale_retention=10
+                stale_retention=50
             )
             
             # Decompress state and apply to grad.
@@ -403,17 +403,44 @@ class Miner:
             self.window_step = 0
 
     # Listens for new blocks and sets self.current_block and self.current_window
-    def block_listener(self, loop):
-        def handler(event, _u, _s):
-            self.current_block = int(event['header']['number'])
-            if int(self.current_block / self.hparams.blocks_per_window) != self.current_window:
-                self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+    def block_listener(self, _):
+        import websockets.exceptions  # Ensure we catch websockets errors
+
+        def handler(event):
+            try:
+                self.current_block = int(event["header"]["number"])
+                new_window = int(self.current_block / self.hparams.blocks_per_window)
+                if new_window != self.current_window:
+                    self.current_window = new_window
+                    self.comms.current_window = self.current_window
+                    tplr.logger.info(
+                        f"New block received. Current window updated to: {self.current_window}"
+                    )
+            except Exception as e:
+                tplr.logger.error(f"Error processing block event: {e}")
+
+        backoff = 1  # initial backoff in seconds
+        max_backoff = 60  # maximum backoff limit
+
         while not self.stop_event.is_set():
             try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)
-                break
-            except Exception:
-                time.sleep(1)
+                # This call subscribes to block headers and might throw keepalive errors
+                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
+                    handler
+                )
+                backoff = 1  # reset backoff if subscription exits without exception
+            except websockets.exceptions.ConnectionClosedError as e:
+                tplr.logger.warning(
+                    f"Websocket ConnectionClosedError caught: {e}. Retrying in {backoff} seconds."
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+            except Exception as e:
+                tplr.logger.error(
+                    f"Block subscription error: {e}. Retrying in {backoff} seconds."
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
 # Start miner/validator.
 if __name__ == "__main__":
