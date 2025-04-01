@@ -1,0 +1,400 @@
+# The MIT License (MIT)
+# © 2024 templar.tech
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+# the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+# fmt: off
+
+# Standard library
+import os
+import sys
+import time
+import random
+import asyncio
+import argparse
+from datetime import datetime
+import threading
+
+# Third party
+import torch
+import bittensor as bt
+import numpy as np
+from torch.optim import AdamW
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+from transformers import LlamaForCausalLM
+from torch.optim.lr_scheduler import (
+    CosineAnnealingWarmRestarts,
+    LinearLR,
+    SequentialLR,
+)
+
+# Local
+import tplr
+
+# GPU optimizations
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+np.random.seed(42)
+random.seed(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+
+class AdamBaseline:
+    """
+    Baseline training implementation using AdamW and DDP for comparison with
+    gradient compression and peer training.
+    """
+    
+    @staticmethod
+    def config():
+        parser = argparse.ArgumentParser(description='AdamW DDP Baseline')
+        parser.add_argument('--project', type=str, default='boom', help='Wandb project.')
+        parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
+        parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+        parser.add_argument('--trace', action='store_true', help='Enable trace logging')
+        
+        # DDP specific args
+        parser.add_argument('--num_gpus', type=int, default=torch.cuda.device_count(), 
+                            help='Number of GPUs to use for distributed training')
+    #    parser.add_argument('--local_rank', type=int, default=-1, 
+     #                       help='Local rank for distributed training. Set by torch.distributed.launch')
+        
+        # Optimizer args
+        parser.add_argument('--learning_rate', type=float, default=1e-4, 
+                            help='Learning rate for AdamW optimizer')
+        parser.add_argument('--weight_decay', type=float, default=0.01, 
+                            help='Weight decay for AdamW optimizer')
+        parser.add_argument('--warmup_steps', type=int, default=250, 
+                            help='Warmup steps for learning rate scheduler')
+        
+        # Dataset args
+        parser.add_argument('--window_size', type=int, default=7, 
+                            help='Window size for dataset iteration')
+        parser.add_argument('--pages_per_worker', type=int, default=10,
+                            help='Number of dataset pages per window')
+        parser.add_argument('--max_steps', type=int, default=20000,
+                            help='Maximum number of training steps (None for unlimited)')
+        parser.add_argument('--seed', type=str, default="adam_baseline",
+                            help='Seed for deterministic page selection')
+        
+        # Checkpoint args
+        parser.add_argument('--save_path', type=str, default='./checkpoints', 
+                            help='Path to save model checkpoints')
+        parser.add_argument('--save_interval', type=int, default=5, 
+                            help='Save checkpoint every N windows')
+        
+        bt.logging.add_args(parser)
+        config = bt.config(parser)
+        
+        if config.debug:
+            tplr.debug()
+        if config.trace:
+            tplr.trace()
+            
+        return config
+    
+    def __init__(self):
+        tplr.logger.debug("Starting AdamW baseline initialization...")
+        
+        # Init config and load hparams
+        self.config = AdamBaseline.config()
+        self.hparams = tplr.load_hparams()
+        # Update hparams with command line args
+        self.hparams.learning_rate = self.config.learning_rate
+        self.hparams.weight_decay = self.config.weight_decay
+        self.hparams.pages_per_window = self.config.pages_per_worker
+        
+        # No bittensor initialization needed
+        # Set up distributed training
+        if self.config.local_rank != -1:
+            # When using torchrun, use env vars
+            self.local_rank = int(os.environ["LOCAL_RANK"])
+            self.global_rank = int(os.environ["RANK"]) 
+            self.world_size = int(os.environ["WORLD_SIZE"])
+        else:
+            # Single-node, manually set up distribution
+            self.local_rank = 0
+            self.global_rank = 0
+            self.world_size = 1
+        
+        # Initialize the distributed process group
+        if self.world_size > 1:
+            torch.cuda.set_device(self.local_rank)
+            init_process_group(backend="nccl", rank=self.global_rank, world_size=self.world_size)
+            tplr.logger.info(f"Initialized DDP: rank {self.global_rank}/{self.world_size-1} on device {self.local_rank}")
+            
+        # Set device
+        self.device = torch.device(f"cuda:{self.local_rank}" if torch.cuda.is_available() else "cpu")
+        
+        # Initialize model, tokenizer, and DDP wrapper
+        self.model = LlamaForCausalLM(self.hparams.model_config)
+        self.model.to(self.device)
+        
+        if self.world_size > 1:
+            self.model = DDP(
+                self.model,
+                device_ids=[self.local_rank],
+                output_device=self.local_rank,
+                find_unused_parameters=False
+            )
+        
+        self.tokenizer = self.hparams.tokenizer
+        
+        # Initialize optimizer and scheduler
+        self.optimizer = AdamW(
+            self.model.parameters(),
+            lr=self.hparams.learning_rate,
+            weight_decay=self.hparams.weight_decay,
+            betas=(0.9, 0.95)
+        )
+        
+        # Set up scheduler similar to miner.py
+        warmup_scheduler = LinearLR(
+            self.optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=self.config.warmup_steps,
+        )
+        cosine_scheduler = CosineAnnealingWarmRestarts(
+            self.optimizer,
+            T_0=10000,
+            T_mult=2,
+            eta_min=self.hparams.learning_rate * 0.1,
+        )
+        self.scheduler = SequentialLR(
+            self.optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[self.config.warmup_steps],
+        )
+        
+        # Create save directory if it doesn't exist
+        if self.global_rank == 0:
+            os.makedirs(self.config.save_path, exist_ok=True)
+        
+        # Init state params
+        self.step_counter = 0
+        self.global_step = 0
+        self.window_step = 0
+        
+        # For tracking metrics
+        self.total_tokens_processed = 0
+        self.batch_times = []
+        
+        # Initialize WandB on main process only
+        if self.global_rank == 0:
+            self.wandb = tplr.initialize_wandb(
+                run_prefix='Adam',
+                uid=self.global_rank,
+                config=self.config,
+                group='baseline',
+                job_type='adam_training'
+            )
+        else:
+            self.wandb = None
+    
+    async def run(self):
+        """Main training loop."""
+
+        for window in range(self.config.max_steps):
+            if self.config.max_steps and self.global_step >= self.config.max_steps:
+                tplr.logger.info(f"Reached maximum steps {self.config.max_steps}. Stopping.")
+                break
+                
+            if self.global_rank == 0:
+                tplr.logger.info(f"\n{'-' * 40} Window: {window} {'-' * 40}")
+            
+            # Get deterministic pages for this window
+            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                offset=window,
+                n_pages=self.hparams.pages_per_window,
+                seed=self.config.seed
+            )
+            
+            # Create data loader
+            loader = await tplr.r2_dataset.R2DatasetLoader.create(
+                batch_size=self.hparams.batch_size,
+                sequence_length=self.hparams.sequence_length,
+                pages_info=pages,
+                tokenizer=self.tokenizer,
+            )
+            
+            if self.global_rank == 0:
+                tplr.logger.info(f"Pages: {[p[1] for p in pages]} for Window: {window}")
+            
+            # Training loop
+            start_time = time.time()
+            compute_start_time = time.time()  # New timing for computation phase
+            if self.global_rank == 0:
+                tplr.logger.info("Start accumulating gradients...")
+            
+            # Initialize optimizer state once at the beginning
+            self.optimizer.zero_grad()
+            self.model.zero_grad()
+            
+            total_loss = 0
+            batch_tokens = 0
+            batch_count = 0
+            all_batches = []
+            
+            # First, iterate through the loader and collect all batches
+            for batch in loader:
+                all_batches.append(batch)
+                batch_count += 1
+            
+            total_batches = len(all_batches)
+            
+            if self.global_rank == 0:
+                tplr.logger.info(f"Collected {total_batches} batches for processing")
+            
+            # Now process all batches with proper DDP sync control
+            for i, batch in enumerate(all_batches):
+                input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
+                labels = input_ids.clone()
+                labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                
+                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                    outputs = self.model(input_ids=input_ids, labels=labels)
+                
+                # Normalize loss by total number of batches
+                loss = outputs.loss / total_batches
+                total_loss += outputs.loss.item()  # Track original loss for logging
+                
+                # Use no_sync for all batches except the last one
+                if isinstance(self.model, DDP) and i < total_batches - 1:
+                    with self.model.no_sync():
+                        loss.backward()
+                else:
+                    # For the last batch, we do a normal backward pass to sync gradients
+                    loss.backward()
+                
+                # Track tokens
+                batch_tokens += (labels != -100).sum().item()
+                
+                if self.global_rank == 0 and i % 5 == 0:
+                    tplr.logger.info(f'Batch {i}/{total_batches-1}, loss: {outputs.loss.item():.4f}')
+            
+            # Apply a single optimization step for all accumulated gradients
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            
+            # Update learning rate schedule once per window
+            self.scheduler.step()
+            
+            # Calculate compute time (from gradient accumulation to optimization)
+            compute_duration = time.time() - compute_start_time
+            
+            # Calculate processing metrics
+            duration = time.time() - start_time
+            self.batch_times.append(duration)
+            self.total_tokens_processed += batch_tokens
+            
+            if self.global_rank == 0:
+                tplr.logger.info(f"Window {window} completed: {i+1} batches with {batch_tokens} tokens in {duration:.2f}s")
+                tplr.logger.info(f"Compute time: {compute_duration:.2f}s, Tokens/sec: {batch_tokens/duration:.2f}")
+                
+                # Log gradient metrics
+                grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+                weight_norms = [p.norm().item() for p in self.model.parameters()]
+                
+                # Wandb logging
+                self.wandb.log({
+                    # Training metrics
+                    "baseline/loss": total_loss/(i+1),
+                    "baseline/tokens_per_sec": batch_tokens/duration,
+                    "baseline/batch_duration": duration,
+                    "baseline/compute_duration": compute_duration,  # New compute time metric
+                    "baseline/total_tokens": self.total_tokens_processed,
+                    "baseline/batch_tokens": batch_tokens,
+                    "baseline/global_step": self.global_step,
+                    
+                    # Resource metrics
+                    "baseline/gpu_memory_allocated": torch.cuda.memory_allocated() / 1024**2,  # MB
+                    "baseline/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,  # MB
+                    
+                    # Network metrics
+                    "baseline/num_gpus": self.world_size,
+                    "baseline/effective_batch_size": self.world_size * self.hparams.batch_size,
+                    
+                    # Optimization metrics
+                    "baseline/learning_rate": self.scheduler.get_last_lr()[0],
+                    
+                    # Gradient statistics as points
+                    "baseline/mean_grad_norm": sum(grad_norms) / len(grad_norms) if grad_norms else 0,
+                    "baseline/max_grad_norm": max(grad_norms) if grad_norms else 0,
+                    "baseline/min_grad_norm": min(grad_norms) if grad_norms else 0,
+                    "baseline/grad_norm_std": torch.tensor(grad_norms).std().item() if grad_norms else 0,
+                    "baseline/mean_weight_norm": sum(weight_norms) / len(weight_norms),
+                }, step=self.global_step)
+                
+                # Save checkpoint
+                if window % self.config.save_interval == 0:
+                    self._save_checkpoint(window)
+            
+            self.global_step += 1
+            self.window_step += 1
+            
+            # Synchronize across processes
+            if self.world_size > 1:
+                torch.distributed.barrier()
+                
+                
+    def _save_checkpoint(self, window):
+        """Save model checkpoint."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(self.config.save_path, f"adam_checkpoint_window_{window}_{timestamp}.pt")
+        
+        if isinstance(self.model, DDP):
+            model_to_save = self.model.module
+        else:
+            model_to_save = self.model
+            
+        checkpoint = {
+            'model_state_dict': model_to_save.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'window': window,
+            'global_step': self.global_step,
+        }
+        
+        torch.save(checkpoint, path)
+        tplr.logger.info(f"Saved checkpoint to {path}")
+        
+    def cleanup(self):
+        """Clean up resources."""
+        if self.world_size > 1:
+            destroy_process_group()
+        
+        if self.wandb is not None:
+            self.wandb.finish()
+
+async def main():
+    """Entry point."""
+    baseline = AdamBaseline()
+    
+    try:
+        await baseline.run()
+    except KeyboardInterrupt:
+        tplr.logger.info("Training interrupted by user")
+    except Exception as e:
+        tplr.logger.error(f"Error during training: {e}")
+        raise
+    finally:
+        baseline.cleanup()
+
+if __name__ == "__main__":
+    asyncio.run(main()) 
