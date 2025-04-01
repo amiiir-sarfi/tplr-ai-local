@@ -25,6 +25,7 @@ import asyncio
 import argparse
 from datetime import datetime
 import threading
+import contextlib
 
 # Third party
 import torch
@@ -32,6 +33,7 @@ import bittensor as bt
 import numpy as np
 from torch.optim import AdamW
 from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
 from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import (
@@ -95,7 +97,7 @@ class AdamBaseline:
         # Checkpoint args
         parser.add_argument('--save_path', type=str, default='./checkpoints', 
                             help='Path to save model checkpoints')
-        parser.add_argument('--save_interval', type=int, default=5, 
+        parser.add_argument('--save_interval', type=int, default=200, 
                             help='Save checkpoint every N windows')
         
         bt.logging.add_args(parser)
@@ -249,44 +251,75 @@ class AdamBaseline:
             total_loss = 0
             batch_tokens = 0
             batch_count = 0
-            all_batches = []
             
-            # First, iterate through the loader and collect all batches
-            for batch in loader:
-                all_batches.append(batch)
-                batch_count += 1
-            
-            total_batches = len(all_batches)
-            
+            # Only rank 0 determines total batches in loader
             if self.global_rank == 0:
-                tplr.logger.info(f"Collected {total_batches} batches for processing")
+                # Count batches in the loader
+                temp_batches = []
+                for batch in loader:
+                    temp_batches.append(batch)
+                total_batches = len(temp_batches)
+                # Free memory
+                del temp_batches
+                tplr.logger.info(f"Determined total batches: {total_batches}")
+            else:
+                total_batches = 0
+                
+            # Broadcast total_batches from rank 0 to all ranks
+            if self.world_size > 1:
+                total_batches_tensor = torch.tensor([total_batches], device=self.device)
+                torch.distributed.broadcast(total_batches_tensor, src=0)
+                total_batches = total_batches_tensor.item()
             
-            # Now process all batches with proper DDP sync control
-            for i, batch in enumerate(all_batches):
-                input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
-                labels = input_ids.clone()
-                labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                
-                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                    outputs = self.model(input_ids=input_ids, labels=labels)
-                
-                # Normalize loss by total number of batches
-                loss = outputs.loss / total_batches
-                total_loss += outputs.loss.item()  # Track original loss for logging
-                
-                # Use no_sync for all batches except the last one
-                if isinstance(self.model, DDP) and i < total_batches - 1:
-                    with self.model.no_sync():
-                        loss.backward()
-                else:
-                    # For the last batch, we do a normal backward pass to sync gradients
+            # Reset the loader for actual processing
+            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                offset=window,
+                n_pages=self.hparams.pages_per_window,
+                seed=self.config.seed
+            )
+            
+            # Create data loader again
+            loader = await tplr.r2_dataset.R2DatasetLoader.create(
+                batch_size=self.hparams.batch_size,
+                sequence_length=self.hparams.sequence_length,
+                pages_info=pages,
+                tokenizer=self.tokenizer,
+            )
+            
+            # Process batches with DDP no_sync for all batches
+            if isinstance(self.model, DDP):
+                ddp_context = self.model.no_sync()
+            else:
+                # Dummy context for non-DDP case
+                ddp_context = contextlib.nullcontext()
+            
+            with ddp_context:
+                for i, batch in enumerate(loader):
+                    batch_count += 1
+                    input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
+                    labels = input_ids.clone()
+                    labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                    
+                    with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                        outputs = self.model(input_ids=input_ids, labels=labels)
+                    
+                    # Normalize loss by total number of batches
+                    loss = outputs.loss / total_batches
+                    total_loss += outputs.loss.item()  # Track original loss for logging
                     loss.backward()
-                
-                # Track tokens
-                batch_tokens += (labels != -100).sum().item()
-                
-                if self.global_rank == 0 and i % 5 == 0:
-                    tplr.logger.info(f'Batch {i}/{total_batches-1}, loss: {outputs.loss.item():.4f}')
+                    
+                    # Track tokens
+                    batch_tokens += (labels != -100).sum().item()
+                    
+                    if self.global_rank == 0 and i % 5 == 0:
+                        tplr.logger.info(f'Batch {i}/{total_batches-1}, loss: {outputs.loss.item():.4f}')
+            
+            # Manually synchronize gradients after all batches
+            if self.world_size > 1:
+                if isinstance(self.model, DDP):
+                    synchronize_gradients(self.model.module)
+                else:
+                    synchronize_gradients(self.model)
             
             # Apply a single optimization step for all accumulated gradients
             self.optimizer.step()
@@ -396,5 +429,11 @@ async def main():
     finally:
         baseline.cleanup()
 
+def synchronize_gradients(model):
+    for param in model.parameters():
+        if param.grad is not None:
+            dist.all_reduce(param.grad, op=dist.ReduceOp.SUM)
+            param.grad /= dist.get_world_size()
+            
 if __name__ == "__main__":
     asyncio.run(main()) 
