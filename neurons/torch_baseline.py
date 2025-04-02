@@ -66,6 +66,7 @@ class AdamBaseline:
     def config():
         parser = argparse.ArgumentParser(description='AdamW DDP Baseline')
         parser.add_argument('--project', type=str, default='boom', help='Wandb project.')
+        parser.add_argument('--run_name', type=str, default='', help='Wandb run name.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -79,15 +80,14 @@ class AdamBaseline:
         # Optimizer args
         parser.add_argument('--learning_rate', type=float, default=1e-4, 
                             help='Learning rate for AdamW optimizer')
-        parser.add_argument('--weight_decay', type=float, default=0.01, 
+        parser.add_argument('--weight_decay', type=float, default=0.1, 
                             help='Weight decay for AdamW optimizer')
         parser.add_argument('--warmup_steps', type=int, default=250, 
                             help='Warmup steps for learning rate scheduler')
         
         # Dataset args
-        parser.add_argument('--window_size', type=int, default=7, 
-                            help='Window size for dataset iteration')
-        parser.add_argument('--pages_per_worker', type=int, default=10,
+
+        parser.add_argument('--pages_per_worker', type=int, default=1,
                             help='Number of dataset pages per window')
         parser.add_argument('--max_steps', type=int, default=20000,
                             help='Maximum number of training steps (None for unlimited)')
@@ -97,7 +97,7 @@ class AdamBaseline:
         # Checkpoint args
         parser.add_argument('--save_path', type=str, default='./checkpoints', 
                             help='Path to save model checkpoints')
-        parser.add_argument('--save_interval', type=int, default=200, 
+        parser.add_argument('--save_interval', type=int, default=500, 
                             help='Save checkpoint every N windows')
         
         bt.logging.add_args(parser)
@@ -200,7 +200,8 @@ class AdamBaseline:
         # Initialize WandB on main process only
         if self.global_rank == 0:
             self.wandb = tplr.initialize_wandb(
-                run_prefix='Adam',
+                run_prefix='Dist',
+                run_name=self.config.run_name,
                 uid=self.global_rank,
                 config=self.config,
                 group='baseline',
