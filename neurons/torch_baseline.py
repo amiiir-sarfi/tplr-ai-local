@@ -44,6 +44,7 @@ from torch.optim.lr_scheduler import (
 
 # Local
 import tplr
+from neurons.demo import DeMo  # Import DeMo optimizer
 
 # GPU optimizations
 torch.manual_seed(42)
@@ -78,12 +79,22 @@ class AdamBaseline:
      #                       help='Local rank for distributed training. Set by torch.distributed.launch')
         
         # Optimizer args
+        parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'demo'],
+                           help='Optimizer to use for training (adamw or demo)')
         parser.add_argument('--learning_rate', type=float, default=1e-4, 
-                            help='Learning rate for AdamW optimizer')
+                            help='Learning rate for optimizer')
         parser.add_argument('--weight_decay', type=float, default=0.1, 
-                            help='Weight decay for AdamW optimizer')
+                            help='Weight decay for optimizer')
         parser.add_argument('--warmup_steps', type=int, default=250, 
                             help='Warmup steps for learning rate scheduler')
+        
+        # DeMo specific args
+        parser.add_argument('--compression_decay', type=float, default=0.999,
+                            help='Compression decay for DeMo optimizer')
+        parser.add_argument('--compression_topk', type=int, default=32,
+                            help='Compression topk for DeMo optimizer')
+        parser.add_argument('--compression_chunk', type=int, default=64,
+                            help='Compression chunk size for DeMo optimizer')
         
         # Dataset args
 
@@ -157,32 +168,52 @@ class AdamBaseline:
         
         self.tokenizer = self.hparams.tokenizer
         
-        # Initialize optimizer and scheduler
-        self.optimizer = AdamW(
-            self.model.parameters(),
-            lr=self.hparams.learning_rate,
-            weight_decay=self.hparams.weight_decay,
-            betas=(0.9, 0.95)
-        )
-        
-        # Set up scheduler similar to miner.py
-        warmup_scheduler = LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=self.config.warmup_steps,
-        )
-        cosine_scheduler = CosineAnnealingWarmRestarts(
-            self.optimizer,
-            T_0=10000,
-            T_mult=2,
-            eta_min=self.hparams.learning_rate * 0.1,
-        )
-        self.scheduler = SequentialLR(
-            self.optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[self.config.warmup_steps],
-        )
+        # Initialize optimizer based on config
+        if self.config.optimizer.lower() == 'demo':
+            tplr.logger.info("Using DeMo optimizer")
+            self.optimizer = DeMo(
+                self.model.parameters(),
+                lr=self.hparams.learning_rate,
+                weight_decay=self.config.weight_decay,
+                compression_decay=self.config.compression_decay,
+                compression_topk=self.config.compression_topk,
+                compression_chunk=self.config.compression_chunk,
+                process_group=dist.group.WORLD if self.world_size > 1 else None
+            )
+            # DeMo scheduler setup
+            self.scheduler = CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=10000,
+                T_mult=2,
+                eta_min=self.hparams.learning_rate * 0.1,
+            )
+        else:
+            tplr.logger.info("Using AdamW optimizer")
+            self.optimizer = AdamW(
+                self.model.parameters(),
+                lr=self.hparams.learning_rate,
+                weight_decay=self.hparams.weight_decay,
+                betas=(0.9, 0.95)
+            )
+            
+            # Set up scheduler similar to miner.py
+            warmup_scheduler = LinearLR(
+                self.optimizer,
+                start_factor=0.1,
+                end_factor=1.0,
+                total_iters=self.config.warmup_steps,
+            )
+            cosine_scheduler = CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=10000,
+                T_mult=2,
+                eta_min=self.hparams.learning_rate * 0.1,
+            )
+            self.scheduler = SequentialLR(
+                self.optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[self.config.warmup_steps],
+            )
         
         # Create save directory if it doesn't exist
         if self.global_rank == 0:
@@ -317,10 +348,12 @@ class AdamBaseline:
             
             # Manually synchronize gradients after all batches
             if self.world_size > 1:
-                if isinstance(self.model, DDP):
-                    synchronize_gradients(self.model.module)
-                else:
-                    synchronize_gradients(self.model)
+                # Only synchronize manually for AdamW, DeMo handles this internally
+                if self.config.optimizer.lower() != 'demo':
+                    if isinstance(self.model, DDP):
+                        synchronize_gradients(self.model.module)
+                    else:
+                        synchronize_gradients(self.model)
             
             # Apply a single optimization step for all accumulated gradients
             self.optimizer.step()
@@ -346,7 +379,7 @@ class AdamBaseline:
                 weight_norms = [p.norm().item() for p in self.model.parameters()]
                 
                 # Wandb logging
-                self.wandb.log({
+                metrics_dict = {
                     # Training metrics
                     "baseline/loss": total_loss/(i+1),
                     "baseline/tokens_per_sec": batch_tokens/duration,
@@ -373,7 +406,16 @@ class AdamBaseline:
                     "baseline/min_grad_norm": min(grad_norms) if grad_norms else 0,
                     "baseline/grad_norm_std": torch.tensor(grad_norms).std().item() if grad_norms else 0,
                     "baseline/mean_weight_norm": sum(weight_norms) / len(weight_norms),
-                }, step=self.global_step)
+                }
+                
+                # Add DeMo specific metrics if using DeMo optimizer
+                if self.config.optimizer.lower() == 'demo':
+                    metrics_dict.update({
+                        "baseline/data_transmit": self.optimizer.data_transmit / 1024**2,  # MB
+                        "baseline/data_receive": self.optimizer.data_receive / 1024**2,  # MB
+                    })
+                
+                self.wandb.log(metrics_dict, step=self.global_step)
                 
                 # Save checkpoint
                 if window % self.config.save_interval == 0:
