@@ -232,8 +232,7 @@ class AdamBaseline:
         if self.global_rank == 0:
             self.wandb = tplr.initialize_wandb(
                 run_prefix='Dist',
-                name=self.config.run_name,
-                uid=self.global_rank,
+                uid=self.config.run_name,
                 config=self.config,
                 group='baseline',
                 job_type='adam_training'
