@@ -180,13 +180,7 @@ class AdamBaseline:
                 compression_chunk=self.config.compression_chunk,
                 process_group=dist.group.WORLD if self.world_size > 1 else None
             )
-            # DeMo scheduler setup
-            self.scheduler = CosineAnnealingWarmRestarts(
-                self.optimizer,
-                T_0=10000,
-                T_mult=2,
-                eta_min=self.hparams.learning_rate * 0.1,
-            )
+
         else:
             tplr.logger.info("Using AdamW optimizer")
             self.optimizer = AdamW(
@@ -197,23 +191,23 @@ class AdamBaseline:
             )
             
             # Set up scheduler similar to miner.py
-            warmup_scheduler = LinearLR(
-                self.optimizer,
-                start_factor=0.1,
-                end_factor=1.0,
-                total_iters=self.config.warmup_steps,
-            )
-            cosine_scheduler = CosineAnnealingWarmRestarts(
-                self.optimizer,
-                T_0=10000,
-                T_mult=2,
-                eta_min=self.hparams.learning_rate * 0.1,
-            )
-            self.scheduler = SequentialLR(
-                self.optimizer,
-                schedulers=[warmup_scheduler, cosine_scheduler],
-                milestones=[self.config.warmup_steps],
-            )
+        warmup_scheduler = LinearLR(
+            self.optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=self.config.warmup_steps,
+        )
+        cosine_scheduler = CosineAnnealingWarmRestarts(
+            self.optimizer,
+            T_0=10000,
+            T_mult=2,
+            eta_min=self.hparams.learning_rate * 0.1,
+        )
+        self.scheduler = SequentialLR(
+            self.optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[self.config.warmup_steps],
+        )
         
         # Create save directory if it doesn't exist
         if self.global_rank == 0:
