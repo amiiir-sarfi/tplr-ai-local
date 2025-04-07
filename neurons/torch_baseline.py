@@ -81,7 +81,7 @@ class AdamBaseline:
         # Optimizer args
         parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'demo'],
                            help='Optimizer to use for training (adamw or demo)')
-        parser.add_argument('--learning_rate', type=float, default=1e-4, 
+        parser.add_argument('--learning_rate', type=float, default=4e-4, 
                             help='Learning rate for optimizer')
         parser.add_argument('--weight_decay', type=float, default=0.1, 
                             help='Weight decay for optimizer')
@@ -199,7 +199,7 @@ class AdamBaseline:
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
-            T_0=10000,
+            T_0=20000,
             T_mult=2,
             eta_min=self.hparams.learning_rate * 0.1,
         )
@@ -300,7 +300,7 @@ class AdamBaseline:
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                 offset=window,
                 n_pages=self.hparams.pages_per_window,
-                seed=self.config.seed
+                seed=random.randint(0, 100000)
             )
             
             # Create data loader again
@@ -425,7 +425,7 @@ class AdamBaseline:
     def _save_checkpoint(self, window):
         """Save model checkpoint."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(self.config.save_path, f"adam_checkpoint_window_{window}_{timestamp}.pt")
+        path = os.path.join(self.config.save_path, f"demo_checkpoint_window_{window}_{timestamp}.pt")
         
         if isinstance(self.model, DDP):
             model_to_save = self.model.module
