@@ -245,11 +245,12 @@ class AdamBaseline:
             if self.global_rank == 0:
                 tplr.logger.info(f"\n{'-' * 40} Window: {window} {'-' * 40}")
             
+            seed = random.randint(0, 100000)
             # Get deterministic pages for this window
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                 offset=window,
                 n_pages=self.hparams.pages_per_window,
-                seed=self.config.seed
+                seed=seed
             )
             
             # Create data loader
@@ -300,7 +301,7 @@ class AdamBaseline:
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                 offset=window,
                 n_pages=self.hparams.pages_per_window,
-                seed=random.randint(0, 100000)
+                seed=seed
             )
             
             # Create data loader again
