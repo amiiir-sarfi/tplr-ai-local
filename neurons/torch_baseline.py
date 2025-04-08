@@ -110,6 +110,8 @@ class AdamBaseline:
                             help='Path to save model checkpoints')
         parser.add_argument('--save_interval', type=int, default=500, 
                             help='Save checkpoint every N windows')
+        parser.add_argument('--load_checkpoint', type=str, default=None,
+                            help='Path to checkpoint file to resume training from')
         
         bt.logging.add_args(parser)
         config = bt.config(parser)
@@ -222,6 +224,10 @@ class AdamBaseline:
         self.total_tokens_processed = 0
         self.batch_times = []
         
+        # Resume from checkpoint if specified
+        if self.config.load_checkpoint is not None:
+            self._load_checkpoint(self.config.load_checkpoint)
+        
         # Initialize WandB on main process only
         if self.global_rank == 0:
             self.wandb = tplr.initialize_wandb(
@@ -237,7 +243,7 @@ class AdamBaseline:
     async def run(self):
         """Main training loop."""
 
-        for window in range(self.config.max_steps):
+        for window in range(self.window_step, self.config.max_steps):
             if self.config.max_steps and self.global_step >= self.config.max_steps:
                 tplr.logger.info(f"Reached maximum steps {self.config.max_steps}. Stopping.")
                 break
@@ -443,6 +449,32 @@ class AdamBaseline:
         
         torch.save(checkpoint, path)
         tplr.logger.info(f"Saved checkpoint to {path}")
+        
+    def _load_checkpoint(self, checkpoint_path):
+        """Load model, optimizer, and training state from checkpoint."""
+        if not os.path.exists(checkpoint_path):
+            tplr.logger.error(f"Checkpoint file not found: {checkpoint_path}")
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+            
+        tplr.logger.info(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        # Load model state
+        if isinstance(self.model, DDP):
+            self.model.module.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            
+        # Load optimizer and scheduler states
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        # Load training state
+        self.global_step = checkpoint.get('global_step', 0)
+        # Resume from the next window after the saved one
+        self.window_step = checkpoint.get('window', 0) + 1
+        
+        tplr.logger.info(f"Resumed training from window {self.window_step-1}, global step {self.global_step}")
         
     def cleanup(self):
         """Clean up resources."""
