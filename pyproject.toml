@@ -5,20 +5,88 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tplr"
 version = "0.1.0"
-description = "Add your description here"
+description = "Incentivised Internet-Wide Training"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "bittensor==8.5.1",
-    "bt-decode==0.4.0",
+    "bittensor==9.1.0",
+    "bt-decode",
     "torch",
     "boto3",
     "einops",
     "aiofiles",
-    "aioboto3",
-    "aiobotocore",
+    "aiofiles==24.1.0",
+    "aioboto3==13.2.0",
     "transformers",
     "pip",
     "wandb",
     "python-dotenv",
+    "zstandard",
+    "s3fs",
+    "pyarrow",
+    "scipy",
+    "rich>=13.0.0",
+    "lm-eval>=0.4.8",
+    "psutil>=7.0.0",
+    "influxdb-client>=1.48.0",
+    "multiprocessing-logging>=0.3.4",
+    "python-logging-loki>=0.3.1",
+    "uvloop>=0.21.0",
+    "openskill>=6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio",
+    "pytest-mock>=3.14.0",
+    "ipykernel",
+    "ipython",
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "ruff",
+    "pytest-xdist",
+    "bittensor-cli",
+    "pytest-dotenv"
+
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v -s --capture=no --log-cli-level=INFO"
+asyncio_mode = "auto"
+markers = [
+    "asyncio: mark test as async",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::FutureWarning",
+    "ignore::pytest_asyncio.plugin.PytestDeprecationWarning",
+    # Keep other warnings
+    "default::RuntimeWarning",
+    "default::UserWarning",
+]
+
+[tool.uv]
+prerelease = "allow"
+
+[tool.ruff]
+# Exclude directories that often trigger permission issues
+exclude = [
+    ".git",
+    "venv",
+    ".venv",
+    "node_modules",
+    "build",
+    "dist",
+    "__pycache__",
+    "downloads",
+    "eggs",
+    ".eggs",
+    "influxdb_data"
 ]
