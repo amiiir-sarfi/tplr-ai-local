@@ -366,7 +366,7 @@ class AdamBaseline:
         # Calculate pages_per_worker
         if self.hparams.pages_per_worker == -1:
             tokens_needed = self.hparams.batch_size * self.hparams.sequence_length * self.hparams.inner_steps
-            estimated_pages = max(1, math.ceil(tokens_needed // 6.5e4)) # Assumption: Pages have at least 65k tokens
+            estimated_pages = max(1, math.ceil(tokens_needed / 6.5e4)) # Assumption: Pages have at least 65k tokens
             tplr.logger.info(f"{tokens_needed=}, {estimated_pages=}")
             self.hparams.pages_per_worker = estimated_pages
         
