@@ -589,10 +589,15 @@ class AdamBaseline:
                 with Timer("data_loading_setup"):
                     # Calculate unique page offset for this worker to ensure unique data
                     page_offset = window * self.world_size + self.global_rank
-                    pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    pages = await retry_call(
+                        tplr.r2_dataset.R2DatasetLoader.next_pages,
                         offset=page_offset * self.hparams.pages_per_worker,
                         n_pages=self.hparams.pages_per_worker,
-                        seed=seed
+                        seed=seed,
+                        attempts=3,
+                        delay=1,
+                        context=f"pages for worker {self.global_rank}",
+                        **{},
                     )
                     
                     loader = await retry_call(
