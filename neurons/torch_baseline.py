@@ -47,8 +47,6 @@ from torch.optim.lr_scheduler import (
 
 # Local
 import tplr
-from neurons.demo import DeMo
-from neurons.strategies import SimpleAccum, Diloco
 
 # GPU optimizations
 torch.manual_seed(42)
@@ -270,7 +268,8 @@ class AdamBaseline:
         tplr.logger.debug("Starting AdamW baseline initialization...")
         
         self.config = AdamBaseline.config()
-        self.hparams = tplr.load_hparams(hparams_file=self.config.hparams_file)
+        hparams_file = os.path.expandvars(os.path.expanduser(self.config.hparams_file))
+        self.hparams = tplr.load_hparams(hparams_file)
         
         self.hparams.micro_batch_size = self.config.micro_batch_size
         self.hparams.batch_size = self.config.batch_size
@@ -450,7 +449,7 @@ class AdamBaseline:
         # Initialize outer optimizer
         self.outer_weight_decay = self.hparams.weight_decay if self.config.strategy.lower() == "normal" else 0.0
         if self.config.outer_optimizer.lower() == 'demo':
-            self.outer_optimizer = DeMo(
+            self.outer_optimizer = tplr.DeMo(
                 self.model.parameters(),
                 lr=self.hparams.outer_learning_rate,
                 weight_decay=self.outer_weight_decay,
@@ -528,12 +527,12 @@ class AdamBaseline:
     def _initialize_strategy(self):
         """Initialize the training strategy."""
         if self.config.strategy.lower() == "diloco":
-            self.strategy = Diloco(
+            self.strategy = tplr.Diloco(
                 self.device, self.world_size, self.global_rank, 
                 self.tokenizer, self.config, self.hparams
             )
         else:
-            self.strategy = SimpleAccum(
+            self.strategy = tplr.SimpleAccum(
                 self.device, self.world_size, self.global_rank, 
                 self.tokenizer, self.config, self.hparams
             )

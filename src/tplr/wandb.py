@@ -50,7 +50,7 @@ def initialize_wandb(
 
     # Initialize WandB
     run = wandb.init(
-        project=f"{config.project}-v{__version__}",
+        project=f"{config.project}",
         # entity="tplr",
         id=run_id,
         resume="must" if run_id else "never",

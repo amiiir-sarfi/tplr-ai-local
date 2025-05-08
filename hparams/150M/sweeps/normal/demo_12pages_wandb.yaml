@@ -1,0 +1,47 @@
+# Wandb sweep for 150M model with 3.7B budget using normal strategy with Demo optimizer
+
+name: demo_sweep_150M_3.7B
+project:  Demo150M_3.7B
+method: grid
+program: neurons/torch_baseline.py
+command:
+  - /usr/bin/env
+  - torchrun
+  - --nproc_per_node=8
+  - ${program} 
+  - ${args_no_boolean_flags}
+
+parameters:
+  # Fixed parameters
+  hparams_file:
+    value: $HOME/tplr-ai-local/hparams/150M/3.7B_budget.json
+  use_compile:
+    value: True
+  run_name:
+    value: demo
+  sequence_length:
+    value: 2048
+  strategy:
+    value: normal
+  outer_optimizer:
+    value: demo
+
+  # Batch size
+  micro_batch_size:
+    value: 20
+  batch_size:
+    value: 380 # 380 means 12 pages per worker
+
+  # Important parameters
+  compression_decay:
+    value: 0.999
+  weight_decay:
+    value: 0.0
+  warmup_steps:
+    value: 250
+  outer_learning_rate:
+    values:
+      - 1e-4
+      - 4e-4
+      - 6e-4
+      - 1e-3
