@@ -18,14 +18,11 @@
 
 # Standard library
 import os
-import sys
 import time
 import random
 import asyncio
 import argparse
 from datetime import datetime
-import threading
-import contextlib
 from collections import defaultdict
 import logging
 import math
@@ -40,7 +37,7 @@ import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
 from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import (
-    CosineAnnealingWarmRestarts,
+    CosineAnnealingLR,
     LinearLR,
     SequentialLR,
 )
@@ -200,7 +197,7 @@ class AdamBaseline:
                         help='sequence length for training')    
         parser.add_argument('--weight_decay', type=float, default=0.1,
                             help='Weight decay for regularization')
-        parser.add_argument('--warmup_steps', type=int, default=250,
+        parser.add_argument('--warmup_steps', type=float, default=250,
                         help='Number of warmup steps for learning rate scheduler')    
         
         ## Inner optimizer
@@ -325,6 +322,7 @@ class AdamBaseline:
             inner_effective_tokens = self.hparams.batch_size * self.world_size * self.hparams.inner_steps * self.hparams.sequence_length
             tplr.logger.info(f"→ Inner cycle: {inner_effective_tokens:,} tokens processed per full inner cycle across all GPUs")
             tplr.logger.info(f"→ Training plan: {self.config.max_steps:,} steps, targeting {total_tokens:,} tokens total (given target: {self.hparams.token_budget:,})")
+            tplr.logger.info(f"→ Scheduler plan: {self.warmup_steps:,} warmup steps, {self.cosine_steps:,} cosine steps, {self.total_scheduler_steps:,} total scheduler steps")
             tplr.logger.info(f"→ Data: {self.hparams.pages_per_worker} pages per worker")
             
             if self.config.use_compile:
@@ -360,13 +358,14 @@ class AdamBaseline:
         # Calculate max_steps
         if self.config.max_steps == -1:
             self.config.max_steps = (self.hparams.token_budget // 
-                                  (self.hparams.sequence_length * self.hparams.batch_size * self.world_size * self.hparams.inner_steps))
+                                  (self.hparams.batch_size * self.hparams.sequence_length * self.hparams.inner_steps * self.world_size))
 
         # Calculate pages_per_worker
         if self.hparams.pages_per_worker == -1:
-            tokens_needed = self.hparams.batch_size * self.hparams.sequence_length * self.hparams.inner_steps
-            estimated_pages = max(1, math.ceil(tokens_needed / 6.5e4)) # Assumption: Pages have at least 65k tokens
-            tplr.logger.info(f"{tokens_needed=}, {estimated_pages=}")
+            tokens_needed_per_window = self.hparams.batch_size * self.hparams.sequence_length * self.hparams.inner_steps
+            # Estimate pages needed assuming ~65k tokens/page
+            estimated_pages = max(1, math.ceil(tokens_needed_per_window / 6.5e4)) 
+            tplr.logger.info(f"Tokens needed per window (effective batch size per worker): {tokens_needed_per_window:,}, Estimated pages per worker per window: {estimated_pages}")
             self.hparams.pages_per_worker = estimated_pages
         
         # Calculate total steps for schedulers
@@ -411,22 +410,37 @@ class AdamBaseline:
     
     def _create_scheduler(self, optimizer, lr):
         """Create a standard scheduler with warmup and cosine annealing."""
+        warmup_steps = self.hparams.warmup_steps
+        # If warmup_steps is given as a fraction of total steps:
+        if warmup_steps < 1:
+            warmup_steps = self.total_scheduler_steps * warmup_steps
+        
+        warmup_steps = int(warmup_steps)
+        cosine_steps = max(1, self.total_scheduler_steps - warmup_steps)
+        self.warmup_steps = warmup_steps
+        self.cosine_steps = cosine_steps
+
+        if warmup_steps >= self.total_scheduler_steps:
+            raise ValueError(
+                f"Warmup steps ({self.hparams.warmup_steps:,}) must be less than total scheduler steps "
+                f"({self.total_scheduler_steps:,})."
+            )
+        
         warmup_scheduler = LinearLR(
             optimizer,
             start_factor=0.1,
             end_factor=1.0,
-            total_iters=self.hparams.warmup_steps,
+            total_iters=warmup_steps,
         )
-        cosine_scheduler = CosineAnnealingWarmRestarts(
+        cosine_scheduler = CosineAnnealingLR(
             optimizer,
-            T_0=self.total_scheduler_steps,
-            T_mult=2,
+            T_max=cosine_steps,
             eta_min=lr * 0.1,
         )
         return SequentialLR(
             optimizer,
             schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[self.hparams.warmup_steps],
+            milestones=[warmup_steps],
         )
     
     def _setup_optimizers_and_schedulers(self):

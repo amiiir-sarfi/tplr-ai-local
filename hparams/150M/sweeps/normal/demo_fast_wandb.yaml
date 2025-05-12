@@ -1,7 +1,7 @@
-# Wandb sweep for 150M model with 3.6B budget using normal strategy with Demo optimizer
+# Wandb sweep for 150M model with 3.7B budget using normal strategy with Demo optimizer
 
-name: demo_sweep_150M_3.7B
-project:  Demo150M_3.7B
+name: demo_fast_sweep_150M_32M
+project:  Demo150M_Buget32M_fast
 method: grid
 program: neurons/torch_baseline.py
 command:
@@ -14,7 +14,7 @@ command:
 parameters:
   # Fixed parameters
   hparams_file:
-    value: $HOME/tplr-ai-local/hparams/150M/3.7B_budget.json
+    value: $HOME/tplr-ai-local/hparams/150M/32M_budget_fast.json
   use_compile:
     value: True
   run_name:
@@ -38,11 +38,10 @@ parameters:
   weight_decay:
     value: 0.0
   warmup_steps:
-    value: 250
+    value: 0.05
   outer_learning_rate:
     values:
-      - 1e-4
+      - 4e-3
       - 4e-4
       - 6e-4
       - 1e-3
-      - 4e-3
