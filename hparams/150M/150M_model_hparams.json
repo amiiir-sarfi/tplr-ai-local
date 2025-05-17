@@ -1,10 +1,4 @@
 {
-    "token_budget":  32768000,
-    "pages_per_worker": -1,
-
-    "topk_compression": 32,
-    "target_chunk": 64,
-    
     "tokenizer_name": "togethercomputer/LLaMA-2-7B-32K",
     "hidden_size": 1024,
     "num_hidden_layers": 12,

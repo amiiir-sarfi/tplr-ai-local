@@ -31,6 +31,7 @@ from .hparams import *
 from .logging import *
 from .schemas import *
 from .r2_dataset import *
+from .sharded_dataset import ShardedGPUDataset, get_sharded_gpu_dataloader
 from .wandb import initialize_wandb
 from .neural.demo import DeMo
 from .neural.strategies import SimpleAccum, Diloco

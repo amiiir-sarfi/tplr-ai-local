@@ -1,9 +1,9 @@
-# Wandb sweep for 150M model with 3.6B budget using normal strategy with Demo optimizer
+# Wandb sweep to test speed of shardedData with and without torch compile on BS=8.
 
-name: demo_sweep_150M_3.7B
-project:  Demo150M_3.7B
+name: Demo150M_speedtest
+project:  Demo150M_speedtest
 method: grid
-program: neurons/torch_baseline.py
+program: neurons/torch_baseline_sharded.py # Using sharded data
 command:
   - /usr/bin/env
   - torchrun
@@ -14,21 +14,22 @@ command:
 parameters:
   # Fixed parameters
   hparams_file:
-    value: $HOME/tplr-ai-local/hparams/150M/3.7B_budget.json
-  use_compile:
-    value: True
+    value: $HOME/tplr-ai-local/hparams/150M/150M_model_hparams.json
   run_name:
-    value: demo
+    value: shardedData
   sequence_length:
     value: 2048
   strategy:
     value: normal
   outer_optimizer:
     value: demo
-
+  debug:
+    value: True 
   # Batch size
+  token_budget:
+    value: 15728640 # effective_bs=(32 * 4 * 2048 = 2**17) * iterations=120
   micro_batch_size:
-    value: 8
+    value: -1
   batch_size:
     value: 8 # With workers=8, bs=8, seqlen=2048 => effective_bs=2**17
 
@@ -38,11 +39,10 @@ parameters:
   weight_decay:
     value: 0.0
   warmup_steps:
-    value: 250
+    value: 0.05
   outer_learning_rate:
-    values:
-      - 1e-4
-      - 4e-4
-      - 6e-4
-      - 1e-3
-      - 4e-3
+    value: 4e-4
+  use_compile:
+    values: 
+    - True
+    - False

@@ -1,0 +1,63 @@
+# Wandb sweep for 150M model with 3.6B budget using normal strategy with Demo optimizer
+
+name: demo_sweep_150M_3.7B_Sharded
+project:  Demo150M_3.7B_Sharded
+method: grid
+program: neurons/torch_baseline_sharded.py
+command:
+  - /usr/bin/env
+  - torchrun
+  - --nproc_per_node=8 # 8 nodes per GPU
+  - ${program} 
+  - ${args_no_boolean_flags}
+
+parameters:
+  ### Fixed parameters
+  # Data params
+  token_budget:
+    value: 3774873600 # [effective_bs=2**19 * iterations=7200] OR [2**17 * iterations=28800]
+  sequence_length:
+    value: 2048
+  micro_batch_size:
+    value: -1 # -1 means use batch size
+  # Model params
+  hparams_file:
+    value: $HOME/tplr-ai-local/hparams/150M/150M_model_hparams.json
+  use_compile:
+    value: True
+
+  # run params
+  run_name:
+    value: demo
+  strategy:
+    value: normal
+  outer_optimizer:
+    value: demo
+
+  ### Important parameters
+  batch_size:
+    values: 
+    - 8 # With workers=8, bs=8, seqlen=2048 => effective_bs=2**17
+    - 32 # With workers=8, bs=32, seqlen=2048 => effective_bs=2**19
+  compression_decay:
+    value: 0.999
+  warmup_steps:
+    value: 250
+  outer_learning_rate:
+    values:
+      - 2e-5
+      - 1e-4
+      - 4e-4
+      - 6e-4
+      - 1e-3
+      # - 4e-3
+      # - 8e-3
+  weight_decay:
+    values: 
+    - 0.0
+    - 0.1
+  compression_decay:
+    values: 
+    - 0.999
+    # - 0.99
+    # - 0.995

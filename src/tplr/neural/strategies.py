@@ -42,12 +42,12 @@ class SimpleAccum(InnerOuterStrategy):
             ddp_context = contextlib.nullcontext()
             
         with ddp_context:
-            for i, batch in enumerate(loader):
-                # Check if we've reached accumulation batch size
-                if accum_batch_size >= self.hparams.batch_size:
-                    break
-                
-                input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
+            for i, batch in enumerate(loader):                
+                if isinstance(loader, torch.utils.data.DataLoader):
+                    input_ids = batch
+                else:
+                    input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
+
                 labels = input_ids.clone()
                 labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
                 
@@ -67,6 +67,10 @@ class SimpleAccum(InnerOuterStrategy):
                 
                 if self.global_rank == 0 and i % 5 == 0:
                     tplr.logger.info(f'Batch {i}, loss: {outputs.loss.item():.4f}, accum: {accum_batch_size}/{self.hparams.batch_size}')
+
+                # Check if we've reached accumulation batch size
+                if accum_batch_size >= self.hparams.batch_size:
+                    break
         
         # Return metrics
         return {
@@ -128,7 +132,10 @@ class Diloco(InnerOuterStrategy):
         
         with ddp_context:
             for i, batch in enumerate(loader):
-                input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
+                if isinstance(loader, torch.utils.data.DataLoader):
+                    input_ids = batch
+                else:
+                    input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
                 labels = input_ids.clone()
                 labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
                 

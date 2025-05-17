@@ -44,6 +44,7 @@ from torch.optim.lr_scheduler import (
 
 # Local
 import tplr
+import tplr.sharded_dataset
 
 # GPU optimizations
 torch.manual_seed(42)
@@ -54,32 +55,6 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-
-async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
-    """
-    Calls an async function with retries.
-
-    Args:
-        func (Callable): An async function.
-        *args: Positional arguments to pass to func.
-        attempts (int): Number of retries.
-        delay (int): Delay between attempts in seconds.
-        context (str): Context description for logging.
-        **kwargs: Keyword arguments to pass to func.
-
-    Returns:
-        The result of func(*args, **kwargs) or None if all attempts fail.
-    """
-    for attempt in range(attempts):
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            tplr.logger.error(
-                f"Attempt {attempt + 1}/{attempts} failed for {context}: {e}"
-            )
-            await asyncio.sleep(delay)
-    tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
-    return None
 
 class Timer:
     """Context manager for timing code blocks."""
@@ -189,7 +164,7 @@ class AdamBaseline:
         # Optimizer args
         parser.add_argument('--strategy', type=str, default='diloco', choices=['normal', 'diloco'],
                            help='Training strategy to use (normal or diloco)')
-        parser.add_argument('--micro_batch_size', type=int, default=16, 
+        parser.add_argument('--micro_batch_size', type=int, default=-1, 
                             help='Micro batches for data loader')
         parser.add_argument('--batch_size', type=int, default=64,
                             help='Batch size for grad accum')
@@ -225,8 +200,10 @@ class AdamBaseline:
         # Dataset args
         parser.add_argument('--token_budget', type=int, default=15728640,
                             help='Token budget for training. If negative, is set from hparams file.')
-        parser.add_argument('--pages_per_worker', type=int, default=-1,
-                            help='Pages per worker for training. If negative, is set based training config (BS, SeqLen, inner_steps).')
+        parser.add_argument('--shards_path', type=str, default='~/datasets/edu_fineweb_score2_10B_tokenized_llama2',
+                            help='Path to the dataset shards.')
+        parser.add_argument('--shard_token_size', type=int, default=100e6,
+                            help='Number of tokens in each stored shard.')
         parser.add_argument('--max_steps', type=int, default=-1,
                             help='Maximum number of training steps (None for unlimited)')
         parser.add_argument('--seed', type=str, default="adam_baseline",
@@ -291,13 +268,15 @@ class AdamBaseline:
 
         self._setup_distributed()
         
-        self._calculate_steps_and_pages()
+        self._calculate_steps()
         
         self._initialize_model_and_tokenizer()
         
         self._setup_optimizers_and_schedulers()
         
         self._initialize_state_and_metrics()
+        
+        self._initialize_dataloader()
         
         self._setup_wandb_and_logging()
         
@@ -331,7 +310,7 @@ class AdamBaseline:
             tplr.logger.info(f"→ Inner cycle: {inner_effective_tokens:,} tokens processed per full inner cycle across all GPUs")
             tplr.logger.info(f"→ Training plan: {self.config.max_steps:,} steps, targeting {total_tokens:,} tokens total (given target: {self.hparams.token_budget:,})")
             tplr.logger.info(f"→ Scheduler plan: {self.warmup_steps:,} warmup steps, {self.cosine_steps:,} cosine steps, {self.total_scheduler_steps:,} total scheduler steps")
-            tplr.logger.info(f"→ Data: {self.config.pages_per_worker} pages per worker")
+            tplr.logger.info(f"→ Data: {len(self.train_loader.dataset)} samples with {self.hparams.sequence_length:,} tokens each (seq_len)")
             
             if self.config.use_compile:
                 tplr.logger.info(f"→ Optimization: Using torch.compile for model execution")
@@ -358,8 +337,8 @@ class AdamBaseline:
             
         self.device = torch.device(f"cuda:{self.local_rank}" if torch.cuda.is_available() else "cpu")
     
-    def _calculate_steps_and_pages(self):
-        """Calculate training steps and pages per worker."""
+    def _calculate_steps(self):
+        """Calculate training steps."""
         if self.config.strategy.lower() == "normal":
             self.hparams.inner_steps = 1
 
@@ -367,14 +346,6 @@ class AdamBaseline:
         if self.config.max_steps == -1:
             self.config.max_steps = (self.hparams.token_budget // 
                                   (self.hparams.batch_size * self.hparams.sequence_length * self.hparams.inner_steps * self.world_size))
-
-        # Calculate pages_per_worker
-        if self.config.pages_per_worker == -1:
-            tokens_needed_per_window = self.hparams.batch_size * self.hparams.sequence_length * self.hparams.inner_steps
-            # Estimate pages needed assuming ~65k tokens/page
-            estimated_pages = max(1, math.ceil(tokens_needed_per_window / 6.5e4)) 
-            tplr.logger.info(f"Tokens needed per window (effective batch size per worker): {tokens_needed_per_window:,}, Estimated pages per worker per window: {estimated_pages}")
-            self.config.pages_per_worker = estimated_pages
         
         # Calculate total steps for schedulers
         self.total_scheduler_steps = self.hparams.token_budget // (self.hparams.batch_size * self.hparams.sequence_length * self.world_size) 
@@ -406,7 +377,7 @@ class AdamBaseline:
                 tplr.logger.info("Synchronized model parameters across all processes")
 
         if self.config.use_compile:
-            self.model = torch.compile(self.model, dynamic=True)
+            self.model = torch.compile(self.model, dynamic=True) 
                 
         if self.world_size > 1:
             self.model = DDP(
@@ -416,6 +387,21 @@ class AdamBaseline:
                 find_unused_parameters=False
             )
     
+    def _initialize_dataloader(self):
+        """Initialize the data loader."""
+        train_dataset = tplr.sharded_dataset.ShardedGPUDataset(
+            shards_path=os.path.expandvars(os.path.expanduser(self.config.shards_path)),
+            token_budget=self.hparams.token_budget,
+            sequence_length=self.hparams.sequence_length,
+            rank=self.global_rank,
+            world_size=self.world_size,
+            device=self.device,
+            shard_token_size=self.config.shard_token_size,
+            split="train"
+        )
+        self.train_loader = tplr.get_sharded_gpu_dataloader(train_dataset, batch_size=self.hparams.micro_batch_size, shuffle=True)
+        
+
     def _create_scheduler(self, optimizer, lr):
         """Create a standard scheduler with warmup and cosine annealing."""
         warmup_steps = self.hparams.warmup_steps
@@ -605,38 +591,6 @@ class AdamBaseline:
                 Timer.reset()
                 
             with Timer("window_total", enabled=True):
-                seed = random.randint(0, 100000)
-                
-                # Load data for this window 
-                with Timer("data_loading_setup"):
-                    # Calculate unique page offset for this worker to ensure unique data
-                    page_offset = window * self.world_size + self.global_rank
-                    pages = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.next_pages,
-                        offset=page_offset * self.config.pages_per_worker,
-                        n_pages=self.config.pages_per_worker,
-                        seed=seed,
-                        attempts=3,
-                        delay=1,
-                        context=f"pages for worker {self.global_rank}",
-                        **{},
-                    )
-                    
-                    loader = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.create,
-                        batch_size=self.hparams.micro_batch_size,
-                        sequence_length=self.hparams.sequence_length,
-                        pages_info=pages,
-                        tokenizer=self.tokenizer,
-                        attempts=3,
-                        delay=1,
-                        context=f"loader for worker {self.global_rank}",
-                        **{},
-                    )
-                    
-                    if self.global_rank == 0:
-                        tplr.logger.info(f"Pages: {[p[1] for p in pages]} for Window: {window}")
-                
                 # Training loop
                 if self.global_rank == 0:
                     tplr.logger.info("Start accumulating gradients...")
@@ -649,7 +603,7 @@ class AdamBaseline:
                 # Use strategy for inner step (gradient accumulation)
                 with Timer("inner_step"):
                     metrics = self.strategy.inner_step(
-                        self.model, loader, 
+                        self.model, self.train_loader, 
                         self.inner_optimizer, self.inner_scheduler
                     )
                 
