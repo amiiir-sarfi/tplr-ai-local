@@ -23,16 +23,19 @@ class DeMo(torch.optim.SGD):
         compression_decay: float = 0.999,
         compression_topk: int = 32,
         compression_chunk: int = 64,
+        momentum: float = 0.0,
+        nesterov: bool = False,
         weight_decay: float = 0.0,
+        use_sign: bool = False,
         process_group: Optional[dist.ProcessGroup] = None,
         **kwargs,
     ):
         super().__init__(
             params,
             foreach=False,
-            momentum=0.0,
+            momentum=momentum,
             dampening=0.0,
-            nesterov=False,
+            nesterov=nesterov,
             maximize=False,
             weight_decay=0.0,
             **kwargs,
@@ -43,6 +46,7 @@ class DeMo(torch.optim.SGD):
         self.compression_topk = compression_topk
         self.process_group = process_group
         self.weight_decay = weight_decay
+        self.use_sign = use_sign
 
         if self.compression_topk <= 0:
             raise ValueError("topk_size has to be positive")
@@ -164,7 +168,8 @@ class DeMo(torch.optim.SGD):
                     p.grad.copy_(new_grad)
 
                 # Sign-SGD
-                p.grad.sign_()
+                if self.use_sign:
+                    p.grad.sign_()
 
         # SGD step
         return super().step(closure)

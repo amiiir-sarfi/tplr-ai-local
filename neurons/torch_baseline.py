@@ -211,6 +211,12 @@ class AdamBaseline:
         ## Outer optimizer
         parser.add_argument('--outer_learning_rate', type=float, default=0.7,
                             help='Learning rate for outer optimizer')
+        parser.add_argument('--outer_momentum', type=float, default=0.0,
+                            help='Momentum for outer optimizer')
+        parser.add_argument('--outer_nesterov', action='store_true',
+                            help='Nesterov for outer optimizer')
+        parser.add_argument('--outer_use_sign', type=int, default=1, choices=[0, 1],
+                            help='Use sign for outer optimizer')
         parser.add_argument('--outer_optimizer', type=str, default='demo', choices=['adamw', 'demo', 'nesterov'],
                            help='Outer optimizer to use for training (adamw or demo or nesterov)')
         
@@ -272,29 +278,15 @@ class AdamBaseline:
         hparams_file = os.path.expandvars(os.path.expanduser(self.config.hparams_file))
         self.hparams = tplr.load_hparams(hparams_file)
         
-        self.hparams.token_budget = self.config.token_budget
-        self.hparams.batch_size = self.config.batch_size
-        self.hparams.sequence_length = self.config.sequence_length
         if self.config.micro_batch_size < 0:
-            self.hparams.micro_batch_size = self.config.batch_size
-        else:
-            self.hparams.micro_batch_size = self.config.micro_batch_size
-
-        self.hparams.inner_steps = self.config.inner_steps
-
-        self.hparams.weight_decay = self.config.weight_decay
-        self.hparams.inner_learning_rate = self.config.inner_learning_rate
-        self.hparams.outer_learning_rate = self.config.outer_learning_rate
-        self.hparams.warmup_steps = self.config.warmup_steps
-
-
+            self.config.micro_batch_size = self.config.batch_size
 
         self._setup_distributed()
-        
+
         self._calculate_steps_and_pages()
-        
+
         self._initialize_model_and_tokenizer()
-        
+
         self._setup_optimizers_and_schedulers()
         
         self._initialize_state_and_metrics()
@@ -307,7 +299,7 @@ class AdamBaseline:
         if self.global_rank == 0:
             
             # Calculate expected training time and tokens
-            tokens_per_step = self.hparams.batch_size * self.world_size * self.hparams.sequence_length * self.hparams.inner_steps
+            tokens_per_step = self.config.batch_size * self.world_size * self.config.sequence_length * self.config.inner_steps
             total_tokens = tokens_per_step * self.config.max_steps
             
             memory_allocated = torch.cuda.memory_allocated() / (1024**3)  # GB
@@ -317,19 +309,19 @@ class AdamBaseline:
             tplr.logger.info(f"TRAINING CONFIGURATION SUMMARY:")
             tplr.logger.info(f"→ Hardware: {self.world_size} GPU(s)")
             tplr.logger.info(f"→ Model memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved (excluding batches)")
-            tplr.logger.info(f"→ Training strategy: {self.config.strategy.upper()} with {self.hparams.inner_steps} inner steps")
+            tplr.logger.info(f"→ Training strategy: {self.config.strategy.upper()} with {self.config.inner_steps} inner steps")
             
             if self.config.strategy.lower() == "diloco":
-                tplr.logger.info(f"→ Inner optimizer: {self.config.inner_optimizer} (lr={self.hparams.inner_learning_rate}, weight_decay={self.hparams.weight_decay}, inner_steps={self.hparams.inner_steps})")
+                tplr.logger.info(f"→ Inner optimizer: {self.config.inner_optimizer} (lr={self.config.inner_learning_rate}, weight_decay={self.config.weight_decay}, inner_steps={self.config.inner_steps})")
             
-            tplr.logger.info(f"→ Outer optimizer: {self.config.outer_optimizer} (lr={self.hparams.outer_learning_rate}, weight_decay={self.outer_weight_decay})")            
-            tplr.logger.info(f"→ Batch hierarchy: {self.hparams.micro_batch_size} (micro) → {self.hparams.batch_size} (accum)")
-            tplr.logger.info(f"→ Sequence length: {self.hparams.sequence_length} tokens per sample")
+            tplr.logger.info(f"→ Outer optimizer: {self.config.outer_optimizer} (lr={self.config.outer_learning_rate}, weight_decay={self.outer_weight_decay})")            
+            tplr.logger.info(f"→ Batch hierarchy: {self.config.micro_batch_size} (micro) → {self.config.batch_size} (accum)")
+            tplr.logger.info(f"→ Sequence length: {self.config.sequence_length} tokens per sample")
             
             # Add token computation information
-            inner_effective_tokens = self.hparams.batch_size * self.world_size * self.hparams.inner_steps * self.hparams.sequence_length
+            inner_effective_tokens = self.config.batch_size * self.world_size * self.config.inner_steps * self.config.sequence_length
             tplr.logger.info(f"→ Inner cycle: {inner_effective_tokens:,} tokens processed per full inner cycle across all GPUs")
-            tplr.logger.info(f"→ Training plan: {self.config.max_steps:,} steps, targeting {total_tokens:,} tokens total (given target: {self.hparams.token_budget:,})")
+            tplr.logger.info(f"→ Training plan: {self.config.max_steps:,} steps, targeting {total_tokens:,} tokens total (given target: {self.config.token_budget:,})")
             tplr.logger.info(f"→ Scheduler plan: {self.warmup_steps:,} warmup steps, {self.cosine_steps:,} cosine steps, {self.total_scheduler_steps:,} total scheduler steps")
             tplr.logger.info(f"→ Data: {self.config.pages_per_worker} pages per worker")
             
@@ -361,24 +353,24 @@ class AdamBaseline:
     def _calculate_steps_and_pages(self):
         """Calculate training steps and pages per worker."""
         if self.config.strategy.lower() == "normal":
-            self.hparams.inner_steps = 1
+            self.config.inner_steps = 1
 
         # Calculate max_steps
         if self.config.max_steps == -1:
-            self.config.max_steps = (self.hparams.token_budget // 
-                                  (self.hparams.batch_size * self.hparams.sequence_length * self.hparams.inner_steps * self.world_size))
+            self.config.max_steps = (self.config.token_budget // 
+                                  (self.config.batch_size * self.config.sequence_length * self.config.inner_steps * self.world_size))
 
         # Calculate pages_per_worker
         if self.config.pages_per_worker == -1:
-            tokens_needed_per_window = self.hparams.batch_size * self.hparams.sequence_length * self.hparams.inner_steps
+            tokens_needed_per_window = self.config.batch_size * self.config.sequence_length * self.config.inner_steps
             # Estimate pages needed assuming ~65k tokens/page
             estimated_pages = max(1, math.ceil(tokens_needed_per_window / 6.5e4)) 
             tplr.logger.info(f"Tokens needed per window (effective batch size per worker): {tokens_needed_per_window:,}, Estimated pages per worker per window: {estimated_pages}")
             self.config.pages_per_worker = estimated_pages
         
         # Calculate total steps for schedulers
-        self.total_scheduler_steps = self.hparams.token_budget // (self.hparams.batch_size * self.hparams.sequence_length * self.world_size) 
-        
+        self.total_scheduler_steps = self.config.token_budget // (self.config.batch_size * self.config.sequence_length * self.world_size) 
+    
     def _initialize_model_and_tokenizer(self):
         """Initialize the model and tokenizer."""
         self.model = LlamaForCausalLM(self.hparams.model_config)
@@ -418,7 +410,7 @@ class AdamBaseline:
     
     def _create_scheduler(self, optimizer, lr):
         """Create a standard scheduler with warmup and cosine annealing."""
-        warmup_steps = self.hparams.warmup_steps
+        warmup_steps = self.config.warmup_steps
         # If warmup_steps is given as a fraction of total steps:
         if warmup_steps < 1:
             warmup_steps = self.total_scheduler_steps * warmup_steps
@@ -430,7 +422,7 @@ class AdamBaseline:
 
         if warmup_steps >= self.total_scheduler_steps:
             raise ValueError(
-                f"Warmup steps ({self.hparams.warmup_steps:,}) must be less than total scheduler steps "
+                f"Warmup steps ({self.config.warmup_steps:,}) must be less than total scheduler steps "
                 f"({self.total_scheduler_steps:,})."
             )
         
@@ -459,31 +451,34 @@ class AdamBaseline:
             if self.config.inner_optimizer.lower() == 'adamw':
                 self.inner_optimizer = AdamW(
                     self.model.parameters(),
-                    lr=self.hparams.inner_learning_rate,
-                    weight_decay=self.hparams.weight_decay,
+                    lr=self.config.inner_learning_rate,
+                    weight_decay=self.config.weight_decay,
                     betas=(0.9, 0.95)
                 )
                 if self.global_rank == 0:
-                    tplr.logger.info(f"Using AdamW as inner optimizer with lr={self.hparams.inner_learning_rate} and weight_decay={self.hparams.weight_decay}")
+                    tplr.logger.info(f"Using AdamW as inner optimizer with lr={self.config.inner_learning_rate} and weight_decay={self.config.weight_decay}")
             else:
                 raise NotImplementedError(f"Unknown inner optimizer: {self.config.inner_optimizer}")
         
         # Initialize outer optimizer
-        self.outer_weight_decay = self.hparams.weight_decay if self.config.strategy.lower() == "normal" else 0.0
+        self.outer_weight_decay = self.config.weight_decay if self.config.strategy.lower() == "normal" else 0.0
         if self.config.outer_optimizer.lower() == 'demo':
             self.outer_optimizer = tplr.DeMo(
                 self.model.parameters(),
-                lr=self.hparams.outer_learning_rate,
+                lr=self.config.outer_learning_rate,
+                momentum=self.config.outer_momentum,
+                nesterov=self.config.outer_nesterov,
                 weight_decay=self.outer_weight_decay,
                 compression_decay=self.config.compression_decay,
                 compression_topk=self.config.compression_topk,
                 compression_chunk=self.config.compression_chunk,
+                use_sign=bool(self.config.outer_use_sign),
                 process_group=dist.group.WORLD if self.world_size > 1 else None
             )
         elif self.config.outer_optimizer.lower() == 'adamw':
             self.outer_optimizer = AdamW(
                 self.model.parameters(),
-                lr=self.hparams.outer_learning_rate,
+                lr=self.config.outer_learning_rate,
                 weight_decay=self.outer_weight_decay,
                 betas=(0.9, 0.95),
                 eps=0.1
@@ -491,7 +486,7 @@ class AdamBaseline:
         elif self.config.outer_optimizer.lower() == 'nesterov':
             self.outer_optimizer = SGD(
                 self.model.parameters(),
-                lr=self.hparams.outer_learning_rate,
+                lr=self.config.outer_learning_rate,
                 weight_decay=self.outer_weight_decay,
                 momentum=0.9,
                 nesterov=True
@@ -500,11 +495,11 @@ class AdamBaseline:
             raise NotImplementedError(f"Unknown outer optimizer: {self.config.outer_optimizer}")
 
         if self.global_rank == 0:
-            tplr.logger.info(f"Using {self.config.outer_optimizer} outer_optimizer with DDP with LR={self.hparams.outer_learning_rate} and weight_decay={self.outer_weight_decay}")
+            tplr.logger.info(f"Using {self.config.outer_optimizer} outer_optimizer with DDP with LR={self.config.outer_learning_rate} and weight_decay={self.outer_weight_decay}")
 
         # Create scheduler
         optimizer_for_scheduler = self.inner_optimizer if self.config.strategy.lower() == "diloco" else self.outer_optimizer
-        lr_for_scheduler = self.hparams.inner_learning_rate if self.config.strategy.lower() == "diloco" else self.hparams.outer_learning_rate
+        lr_for_scheduler = self.config.inner_learning_rate if self.config.strategy.lower() == "diloco" else self.config.outer_learning_rate
         scheduler = self._create_scheduler(optimizer_for_scheduler, lr_for_scheduler)
         self.scheduler = scheduler
         if self.config.strategy.lower() == "diloco":
@@ -579,8 +574,8 @@ class AdamBaseline:
         self.timing_logger.addHandler(file_handler)
         
         self.timing_logger.info(f"Starting new training run - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        self.timing_logger.info(f"Configuration: optimizer={self.config.outer_optimizer}, lr={self.hparams.outer_learning_rate}, "
-                               f"world_size={self.world_size}, batch_size={self.hparams.batch_size}")
+        self.timing_logger.info(f"Configuration: optimizer={self.config.outer_optimizer}, lr={self.config.outer_learning_rate}, "
+                               f"world_size={self.world_size}, batch_size={self.config.batch_size}")
         self.timing_logger.info("-" * 80)
 
     def log_timing(self, message):
@@ -624,8 +619,8 @@ class AdamBaseline:
                     
                     loader = await retry_call(
                         tplr.r2_dataset.R2DatasetLoader.create,
-                        batch_size=self.hparams.micro_batch_size,
-                        sequence_length=self.hparams.sequence_length,
+                        batch_size=self.config.micro_batch_size,
+                        sequence_length=self.config.sequence_length,
                         pages_info=pages,
                         tokenizer=self.tokenizer,
                         attempts=3,
@@ -633,9 +628,6 @@ class AdamBaseline:
                         context=f"loader for worker {self.global_rank}",
                         **{},
                     )
-                    
-                    if self.global_rank == 0:
-                        tplr.logger.info(f"Pages: {[p[1] for p in pages]} for Window: {window}")
                 
                 # Training loop
                 if self.global_rank == 0:
@@ -692,7 +684,7 @@ class AdamBaseline:
                     
                     self.log_timing("-" * 40)
                 
-                tplr.logger.info(f"effective_batch_size: {self.hparams.batch_size * self.world_size}")
+                tplr.logger.info(f"effective_batch_size: {self.config.batch_size * self.world_size}")
                 tplr.logger.info(f"Window {window} completed: {batch_count} batches with {batch_tokens} tokens")
                 
                 # Log gradient metrics
@@ -723,7 +715,7 @@ class AdamBaseline:
                     
                     # Network metrics
                     "setting/num_gpus": self.world_size,
-                    "setting/effective_batch_size": self.world_size * self.hparams.batch_size * self.hparams.inner_steps,
+                    "setting/effective_batch_size": self.world_size * self.config.batch_size * self.config.inner_steps,
                     "setting/learning_rate": self.scheduler.get_last_lr()[0],
                     
                     # Gradient statistics as points
@@ -739,7 +731,7 @@ class AdamBaseline:
                 # Add optimizer-specific learning rates
                 if self.config.strategy.lower() == "diloco" and self.inner_optimizer:
                     metrics_dict["setting/inner_learning_rate"] = self.inner_scheduler.get_last_lr()[0]
-                    metrics_dict["setting/outer_learning_rate"] = self.hparams.outer_learning_rate
+                    metrics_dict["setting/outer_learning_rate"] = self.config.outer_learning_rate
                 
                 # Add DeMo specific metrics if using DeMo optimizer
                 if self.config.outer_optimizer.lower() == 'demo':

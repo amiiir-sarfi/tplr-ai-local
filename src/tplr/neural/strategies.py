@@ -18,13 +18,12 @@ class InnerOuterStrategy(ABC):
         pass
 
 class SimpleAccum(InnerOuterStrategy):
-    def __init__(self, device, world_size, global_rank, tokenizer, config, hparams):
+    def __init__(self, device, world_size, global_rank, tokenizer, config):
         self.device = device
         self.world_size = world_size
         self.global_rank = global_rank
         self.tokenizer = tokenizer
         self.config = config
-        self.hparams = hparams
     
     def inner_step(self, model, loader, inner_optimizer=None, inner_scheduler=None):
         """
@@ -58,7 +57,7 @@ class SimpleAccum(InnerOuterStrategy):
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     outputs = model(input_ids=input_ids, labels=labels)
                 
-                loss = outputs.loss / self.hparams.batch_size
+                loss = outputs.loss / self.config.batch_size
                 loss.backward()
                 
                 total_loss += outputs.loss.item()
@@ -66,10 +65,10 @@ class SimpleAccum(InnerOuterStrategy):
                 batch_tokens += (labels != -100).sum().item()
                 
                 if self.global_rank == 0 and i % 5 == 0:
-                    tplr.logger.info(f'Batch {i}, loss: {outputs.loss.item():.4f}, accum: {accum_batch_size}/{self.hparams.batch_size}')
+                    tplr.logger.info(f'Batch {i}, loss: {outputs.loss.item():.4f}, accum: {accum_batch_size}/{self.config.batch_size}')
 
                 # Check if we've reached accumulation batch size
-                if accum_batch_size >= self.hparams.batch_size:
+                if accum_batch_size >= self.config.batch_size:
                     break
         
         # Return metrics
@@ -99,13 +98,12 @@ class SimpleAccum(InnerOuterStrategy):
                 param.grad /= dist.get_world_size()
 
 class Diloco(InnerOuterStrategy):
-    def __init__(self, device, world_size, global_rank, tokenizer, config, hparams):
+    def __init__(self, device, world_size, global_rank, tokenizer, config):
         self.device = device
         self.world_size = world_size
         self.global_rank = global_rank
         self.tokenizer = tokenizer
         self.config = config
-        self.hparams = hparams
         
         # Store offloaded parameters
         self.params_offloaded = None
@@ -145,7 +143,7 @@ class Diloco(InnerOuterStrategy):
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     outputs = model(input_ids=input_ids, labels=labels)
                 
-                loss = outputs.loss / self.hparams.batch_size
+                loss = outputs.loss / self.config.batch_size
                 loss.backward()
                 
                 total_loss += outputs.loss.item()
@@ -154,22 +152,22 @@ class Diloco(InnerOuterStrategy):
                 
                 
                 # If we've accumulated enough batch size, do an optimization step
-                if accum_batch_size >= self.hparams.batch_size:
+                if accum_batch_size >= self.config.batch_size:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     inner_optimizer.step()
                     inner_scheduler.step()
                     inner_optimizer.zero_grad()
                     
                     if self.global_rank == 0 and inner_step_count % 5 == 0:
-                        tplr.logger.info(f'Inner Step {inner_step_count+1}/{self.hparams.inner_steps}, '
+                        tplr.logger.info(f'Inner Step {inner_step_count+1}/{self.config.inner_steps}, '
                             f'Batch {i}, loss: {outputs.loss.item():.4f}, '
-                            f'accum: {accum_batch_size}/{self.hparams.batch_size}')
+                            f'accum: {accum_batch_size}/{self.config.batch_size}')
                         
                     inner_step_count += 1
                     accum_batch_size = 0
                 
                     # If we've done enough inner steps, break
-                    if inner_step_count >= self.hparams.inner_steps:
+                    if inner_step_count >= self.config.inner_steps:
                         break
         
         return {
