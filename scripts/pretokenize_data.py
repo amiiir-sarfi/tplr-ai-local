@@ -9,9 +9,10 @@ import argparse
 import multiprocessing as mp
 import numpy as np
 from transformers import AutoTokenizer, AutoConfig
-from datasets import load_dataset, Features, Value
+from datasets import load_dataset
 from tqdm import tqdm
 import math
+import glob
 
 # Global tokenizer for multiprocessing. Initialized in each worker.
 _tokenizer_object = None
@@ -51,6 +52,29 @@ def tokenize_document_entry(doc_entry):
 
 
 def main(params):
+    num_expected_shards = math.ceil(params.total_tokens_to_process / params.shard_size)
+    
+    if os.path.isdir(params.output_dir):
+        # Count existing .npy files that match the shard naming pattern
+        shard_pattern = os.path.join(params.output_dir, "train_*.npy")
+        existing_shards = glob.glob(shard_pattern)
+        num_existing_shards = 0
+        for f_path in existing_shards:
+            if os.path.isfile(f_path): # ensure it's a file
+                 # Further check if the filename format is as expected (e.g., train_000000.npy)
+                fname = os.path.basename(f_path)
+                if fname.startswith("train_") and fname.endswith(".npy") and fname[6:-4].isdigit():
+                    num_existing_shards +=1
+
+        if num_existing_shards >= num_expected_shards:
+            print(f"Output directory '{params.output_dir}' already exists and contains "
+                  f"{num_existing_shards} (>= {num_expected_shards} expected) shard files.")
+            print("Skipping pretokenization.")
+            return # Exit the main function gracefully
+        else:
+            print(f"Output directory '{params.output_dir}' exists but has {num_existing_shards} shards, "
+                  f"less than the expected {num_expected_shards}. Proceeding with tokenization.")
+
     os.makedirs(params.output_dir, exist_ok=True)
 
     print(f"Using tokenizer: {params.tokenizer_name}")
@@ -85,15 +109,17 @@ def main(params):
     num_tokens_in_shard = 0
     total_tokens_processed_overall = 0
 
-    num_expected_shards = math.ceil(params.total_tokens_to_process / params.shard_size)
+    estimated_shards= math.ceil(params.total_tokens_to_process / params.shard_size)
     print(f"Targeting {params.total_tokens_to_process / 1e9:.2f}B tokens.")
-    print(f"Shard size: {params.shard_size / 1e6:.2f}M tokens. Estimated shards: {num_expected_shards}")
+    print(f"Shard size: {params.shard_size / 1e6:.2f}M tokens. Estimated shards: {estimated_shards}")
+
 
     with mp.Pool(processes=tokenizer_processes,
                    initializer=initialize_worker_tokenizer,
                    initargs=(params.tokenizer_name,)) as token_pool:
 
         dataset_iterator = iter(streamed_dataset)
+        
         with tqdm(total=params.total_tokens_to_process, unit="tokens", desc="Overall Token Progress") as progress_bar:
             for tokenized_doc_np in token_pool.imap(tokenize_document_entry, dataset_iterator, chunksize=params.processing_chunk_size):
 
@@ -101,26 +127,22 @@ def main(params):
                     break
 
                 if len(tokenized_doc_np) == 0:
-                    continue
+                    continue # Skip if document was empty or invalid
 
-                doc_tokens_list = tokenized_doc_np.tolist() # Work with list for easier slicing/popping if needed
+                doc_tokens_list = tokenized_doc_np.tolist()
 
                 idx_in_doc = 0
                 while idx_in_doc < len(doc_tokens_list):
                     if total_tokens_processed_overall >= params.total_tokens_to_process:
                         break
 
-                    # Space available in current shard
                     space_in_shard = params.shard_size - num_tokens_in_shard
-                    # Tokens remaining in current document
                     tokens_left_in_doc = len(doc_tokens_list) - idx_in_doc
-                    # Max tokens we can take before hitting global limit
                     tokens_before_global_limit = params.total_tokens_to_process - total_tokens_processed_overall
 
-                    # Determine how many tokens to take in this step
                     num_to_take = min(space_in_shard, tokens_left_in_doc, tokens_before_global_limit)
 
-                    if num_to_take == 0: # Should only happen if global limit is hit exactly
+                    if num_to_take == 0: # Should only happen if global limit is hit exactly or doc is empty
                         break
 
                     tokens_for_this_step = doc_tokens_list[idx_in_doc : idx_in_doc + num_to_take]
@@ -138,13 +160,16 @@ def main(params):
                         shard_idx += 1
                         num_tokens_in_shard = 0
 
+
                 if total_tokens_processed_overall >= params.total_tokens_to_process:
                     break # Break from outer for-loop over documents
 
-    if num_tokens_in_shard > 0:
+    # After the loop, if there are remaining tokens in the buffer, write them to a final shard
+    if num_tokens_in_shard > 0 and total_tokens_processed_overall > 0: 
         final_shard_filename = os.path.join(params.output_dir, f"train_{shard_idx:06d}.npy")
         tqdm.write(f"Writing final shard {shard_idx} ({num_tokens_in_shard / 1e6:.2f}M tokens) to {final_shard_filename}")
         np.save(final_shard_filename, shard_token_buffer[:num_tokens_in_shard]) # Save only the filled part
+        shard_idx += 1
 
     print(f"Completed tokenization. Total tokens processed and saved: {total_tokens_processed_overall:,}")
 
@@ -178,7 +203,6 @@ if __name__ == "__main__":
 
     parsed_args = parser.parse_args()
     
-    # Ensure dataset_config_name is Python None if provided as string "None"
     if isinstance(parsed_args.dataset_config_name, str) and parsed_args.dataset_config_name.lower() == "none":
         parsed_args.dataset_config_name = None
         

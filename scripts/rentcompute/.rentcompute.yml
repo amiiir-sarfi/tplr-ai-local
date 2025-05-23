@@ -1,0 +1,7 @@
+provisioning:
+  type: script
+  script: ./run_job_on_celium.sh
+
+sync:
+  - source: ~/tplr-ai-local/.env
+    destination: ~/tplr-ai-local/.env
