@@ -63,20 +63,21 @@ def create_parser() -> argparse.ArgumentParser:
     provision_parser.add_argument(
         "-y", "--yes", action="store_true", help="Skip confirmation prompt"
     )
-    # Add wandb_agent and local_env_path to provision command
+    # Add wandb_agents (plural) and local_env_path to provision command
     provision_parser.add_argument(
-        "--wandb-agent",
-        dest="wandb_agent",
+        "--wandb-agents",  # Changed from --wandb-agent
+        dest="wandb_agents", # Changed from wandb_agent
         type=str,
-        help="W&B agent ID to run after provisioning. Instance may shut down after agent finishes.",
-        default=None,
+        nargs='*', # Accept zero or more arguments
+        help="One or more W&B agent IDs to run sequentially after provisioning. Instance may shut down after all agents finish.",
+        default=[], # Default to an empty list
     )
     provision_parser.add_argument(
         "--local-env-path",
         dest="local_env_path",
         type=str,
-        help="Path to local .env file to copy during provisioning if the provisioning script uses it (e.g. with --wandb-agent).",
-        default="~/tplr-ai-local/.env", # Default matches start command
+        help="Path to local .env file to copy during provisioning if the provisioning script uses it (e.g. with --wandb-agents).",
+        default="~/tplr-ai-local/.env",
     )
 
     start_parser.add_argument(
@@ -147,17 +148,18 @@ def create_parser() -> argparse.ArgumentParser:
         help="Provision the instance using configuration from .rentcompute.yml",
     )
     start_parser.add_argument(
-        "--wandb-agent",
-        dest="wandb_agent",
+        "--wandb-agents", # Changed from --wandb-agent
+        dest="wandb_agents", # Changed from wandb_agent
         type=str,
-        help="W&B agent ID to run after provisioning. Instance will shut down after agent finishes.",
-        default=None,
+        nargs='*', # Accept zero or more arguments
+        help="One or more W&B agent IDs to run sequentially after provisioning. Instance may shut down after all agents finish.",
+        default=[], # Default to an empty list
     )
     start_parser.add_argument(
         "--local-env-path",
         dest="local_env_path",
         type=str,
-        help="Path to local .env file to copy during provisioning if --wandb-agent is used.",
+        help="Path to local .env file to copy during provisioning if --wandb-agents are used.",
         default="~/tplr-ai-local/.env",
     )
 
@@ -322,20 +324,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # Check if credentials exist for all other commands
         try:
-            # Just check if we can load credentials, we don't need to use them here
             config.load_credentials()
         except FileNotFoundError:
             print("No credentials found. Please enter your API key:")
             login.run(config)
-            # Re-load credentials if login was successful (or exit if not)
             config.load_credentials()
 
 
         # Continue with the requested command
         if args.command == "start":
-            # Combine all filter parameters
             instance_config = {
-                "machine_id": args.machine_id,  # Direct machine ID selection
+                "machine_id": args.machine_id,
                 "gpu": {
                     "min": args.gpu_min,
                     "max": args.gpu_max,
@@ -347,12 +346,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 },
                 "ssh_key": args.ssh_key,
                 "provision": args.provision,
-                "wandb_agent": args.wandb_agent, 
+                "wandb_agents": args.wandb_agents, # Changed from wandb_agent
                 "local_env_path": args.local_env_path 
             }
             start.run(config, instance_config, name=args.name)
         elif args.command == "search":
-            # Combine all filter parameters
             instance_config = {
                 "gpu": {
                     "min": args.gpu_min,
@@ -373,23 +371,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 stop.stop_instance(config, args.instance_id, skip_confirmation=args.yes)
         elif args.command == "provision":
-            # Pass wandb_agent and local_env_path to the provision command
             provision.run(
                 config, 
                 args.instance_id, 
                 skip_confirmation=args.yes,
-                wandb_agent=args.wandb_agent,
+                wandb_agents=args.wandb_agents, # Changed from wandb_agent
                 local_env_path=args.local_env_path
             )
         elif args.command == "rsync":
-            # Determine if we're using --all or a specific instance
             instance_id_to_sync = None
-            if args.instance_id: # Specific ID given
+            if args.instance_id: 
                 instance_id_to_sync = args.instance_id
-            elif not args.all: # Neither --id nor --all given, but --all has default=True
-                               # This case should ideally not happen if arg group forces one.
-                               # For safety, if --all is False and --id is None, sync all.
-                pass # instance_id_to_sync remains None, meaning all
+            elif not args.all: 
+                pass 
 
             rsync.run(
                 config,
@@ -399,7 +393,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 reload_after=args.reload,
             )
         elif args.command == "reload":
-            # Determine if we're using --all or a specific instance
             if args.all:
                 reload.reload_all(
                     config, config_path=args.config_path, skip_confirmation=args.yes
@@ -417,7 +410,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         return 0
     except Exception as e:
-        logger.exception("An error occurred:") # Log with traceback if debug is on
+        logger.exception("An error occurred:") 
         print(f"Error: {e}", file=sys.stderr)
         return 1
 

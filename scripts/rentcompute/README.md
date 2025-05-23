@@ -43,7 +43,7 @@ rentcompute start \
 --price-min=0. --price-max=16 \
 --provision \
 --ssh-key $HOME/.ssh/id_rsa.pub \
---wandb-agent "your_wandb_sweep_id/your_agent_id" \
+--wandb-agents "sweep_id_1/agent_id_1" "sweep_id_2/agent_id_2" \
 --local-env-path $HOME/tplr-ai-local/.env
 
 # Start with specific requirements and custom name
@@ -107,8 +107,8 @@ rentcompute provision --id <instance-id>
 
 # Provision an existing instance and specify a W&B agent to run
 rentcompute provision --id <instance-id> \
-    --wandb-agent "your_wandb_sweep_id/your_agent_id" \
-    --local-env-path $HOME/tplr-ai-local/.env
+--wandb-agents "sweep_id_1/agent_id_1" "sweep_id_2/agent_id_2" \
+--local-env-path $HOME/tplr-ai-local/.env
 
 # Provision without confirmation
 rentcompute provision --id <instance-id> -y
@@ -211,7 +211,7 @@ reload:
 ### Running a Job on an Existing Pod
 To run a wandb sweep on an existing pod, use the following command:
 ```bash
-./run_sweep_on_existing_pod.sh -i <POD_ID> -a <WANDB_AGENT_ID> [-e <PATH_TO_LOCAL_.ENV_FILE>]
+./run_sweep_on_existing_pod.sh -i <POD_ID> -a "sweep_id_1/agent_id_1 sweep_id_2/agent_id_2" [-e <PATH_TO_LOCAL_.ENV_FILE>]
 ```
 To get a list of available pods:
 ```bash

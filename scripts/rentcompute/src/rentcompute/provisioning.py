@@ -9,7 +9,7 @@ import subprocess
 import logging
 import yaml
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from rentcompute.providers.base import Pod
 
@@ -121,7 +121,8 @@ def provision_instance(pod: Pod, instance_config_for_script: Optional[Dict[str, 
 
     Args:
         pod: Instance pod to provision
-        instance_config_for_script: Configuration for the instance script (optional)
+        instance_config_for_script: Configuration for the instance script (optional),
+                                    may include 'wandb_agents' (list) and 'local_env_path'.
 
     Returns:
         True if provisioning was successful, False otherwise
@@ -160,6 +161,7 @@ def _provision_with_script(pod: Pod, config: Dict[str, Any], instance_config_for
     Args:
         pod: Instance pod to provision
         config: Provisioning configuration
+        instance_config_for_script: Optional dict, may contain 'wandb_agents' (list) and 'local_env_path'.
 
     Returns:
         True if provisioning was successful, False otherwise
@@ -194,11 +196,14 @@ def _provision_with_script(pod: Pod, config: Dict[str, Any], instance_config_for
         }
     )
     if instance_config_for_script:
-        if instance_config_for_script.get("wandb_agent"):
-            env["RENTCOMPUTE_WANDB_AGENT"] = instance_config_for_script["wandb_agent"]
-        if instance_config_for_script.get("local_env_path"):
-            # Expand user path locally before passing to script
-            local_env_path = os.path.expanduser(instance_config_for_script["local_env_path"])
+        wandb_agents_list: Optional[List[str]] = instance_config_for_script.get("wandb_agents")
+        if wandb_agents_list and isinstance(wandb_agents_list, list) and len(wandb_agents_list) > 0:
+            env["RENTCOMPUTE_WANDB_AGENT_LIST"] = ",".join(wandb_agents_list)
+            logger.info(f"Passing RENTCOMPUTE_WANDB_AGENT_LIST: {env['RENTCOMPUTE_WANDB_AGENT_LIST']}")
+        
+        local_env_path_raw = instance_config_for_script.get("local_env_path")
+        if local_env_path_raw:
+            local_env_path = os.path.expanduser(local_env_path_raw)
             if os.path.exists(local_env_path):
                 env["RENTCOMPUTE_LOCAL_ENV_PATH"] = local_env_path
             else:
@@ -209,15 +214,14 @@ def _provision_with_script(pod: Pod, config: Dict[str, Any], instance_config_for
         [script_path], 
         env=env, 
         stdout=subprocess.PIPE, 
-        stderr=subprocess.STDOUT, # Capture stderr to stdout
+        stderr=subprocess.STDOUT, 
         text=True,
-        bufsize=1 # Line buffered
+        bufsize=1 
     )
     
-    # Stream output
     if process.stdout:
         for line in iter(process.stdout.readline, ''):
-            print(line, end='') # Print line by line
+            print(line, end='') 
     
     return_code = process.wait()
 
@@ -245,29 +249,18 @@ def _provision_with_ansible(pod: Pod, config: Dict[str, Any]) -> bool:
         print("No playbook specified in provisioning configuration")
         return False
 
-    # Check for root_dir parameter and switch to that directory if specified
     current_dir = os.getcwd()
     root_dir = config.get("root_dir")
     ansible_dir = current_dir
 
     if root_dir:
-        # Resolve to absolute path using Path.resolve() which handles .., ., and ~
         try:
-            # First expand any ~ in the path
             expanded_path = os.path.expanduser(root_dir)
-
-            # Create a Path object - if relative, it will be relative to current_dir
             root_path = Path(expanded_path)
-
-            # Resolve to absolute path (handles .. and . correctly)
             resolved_path = root_path.resolve()
-
-            # Check if directory exists
             if resolved_path.is_dir():
                 ansible_dir = str(resolved_path)
                 print(f"Using Ansible root directory: {ansible_dir}")
-
-                # Convert playbook path to be relative to the ansible_dir if it's not absolute
                 if not os.path.isabs(playbook_path):
                     playbook_path = os.path.join(ansible_dir, playbook_path)
             else:
@@ -279,14 +272,11 @@ def _provision_with_ansible(pod: Pod, config: Dict[str, Any]) -> bool:
                 f"Error resolving Ansible root directory: {e}. Using current directory."
             )
 
-    # Check if playbook exists
     if not os.path.exists(playbook_path):
         print(f"Ansible playbook not found: {playbook_path}")
         return False
 
-    # Create temporary inventory file in ansible_dir
     inventory_path = Path(ansible_dir) / ".rentcompute_inventory.ini"
-
     private_key_path = (
         pod.key_path.replace(".pub", "")
         if pod.key_path.endswith(".pub")
@@ -294,58 +284,43 @@ def _provision_with_ansible(pod: Pod, config: Dict[str, Any]) -> bool:
     )
 
     try:
-        # Get the target hosts group from config or use default
         hosts_group = config.get("hosts_group", "rentcompute")
-
         with open(inventory_path, "w") as f:
             f.write(f"[{hosts_group}]\n")
             f.write(
                 f"{pod.host} ansible_user={pod.user} ansible_port={pod.port} ansible_ssh_private_key_file={private_key_path}\n"
             )
 
-        # Initialize extra_vars_args list
         extra_vars_args = []
-
-        # Check for vars_file if specified
         vars_file = config.get("vars_file")
         if vars_file:
-            # Calculate the path relative to ansible_dir if it's not absolute
             if not os.path.isabs(vars_file):
                 vars_file_path = os.path.join(ansible_dir, vars_file)
             else:
                 vars_file_path = vars_file
-
-            # Verify the vars file exists
             if os.path.isfile(vars_file_path):
                 print(f"Using vars file: {vars_file_path}")
                 extra_vars_args.extend(["-e", f"@{vars_file_path}"])
             else:
                 print(f"Warning: Vars file not found: {vars_file_path}")
 
-        # Get inline extra vars if specified
         extra_vars = config.get("extra_vars", {})
         if extra_vars:
             for key, value in extra_vars.items():
                 extra_vars_args.extend(["-e", f"{key}={value}"])
 
-        # Build ansible command with increased verbosity for better debugging
         cmd = ["ansible-playbook", "-i", str(inventory_path), playbook_path, "-v"]
         cmd.extend(extra_vars_args)
 
-        # Change working directory if needed for ansible execution
         original_dir = os.getcwd()
         try:
             if ansible_dir != original_dir:
                 os.chdir(ansible_dir)
                 print(f"Changed to directory: {ansible_dir}")
 
-            # Create environment with ANSIBLE_HOST_KEY_CHECKING=false
             env = os.environ.copy()
             env["ANSIBLE_HOST_KEY_CHECKING"] = "false"
-
             print(f"Running Ansible provisioning with playbook: {playbook_path}")
-
-            # Run Ansible with live output streaming instead of capturing
             print("\n--- Ansible Provisioning Output ---")
             process = subprocess.Popen(
                 cmd,
@@ -353,14 +328,12 @@ def _provision_with_ansible(pod: Pod, config: Dict[str, Any]) -> bool:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1,  # Line buffered
+                bufsize=1,
             )
 
-            # Stream output in real-time
             for line in iter(process.stdout.readline, ""):
-                print(line, end="")  # Print line by line as they come in
+                print(line, end="")
 
-            # Wait for process to complete and get return code
             process.stdout.close()
             return_code = process.wait()
             print("--- End of Ansible Output ---\n")
@@ -372,14 +345,12 @@ def _provision_with_ansible(pod: Pod, config: Dict[str, Any]) -> bool:
                 print(f"Ansible provisioning failed with exit code {return_code}")
                 return False
         finally:
-            # Return to original directory
             if ansible_dir != original_dir:
                 os.chdir(original_dir)
     except Exception as e:
         print(f"Error during Ansible provisioning: {e}")
         return False
     finally:
-        # Clean up temporary inventory file
         if inventory_path.exists():
             inventory_path.unlink()
 
@@ -399,19 +370,16 @@ def _provision_with_docker(pod: Pod, config: Dict[str, Any]) -> bool:
         print("No docker-compose file specified in provisioning configuration")
         return False
 
-    # Check if compose file exists
     if not os.path.exists(compose_file):
         print(f"Docker Compose file not found: {compose_file}")
         return False
 
-    # Create SSH command to copy and run docker-compose
     private_key_path = (
         pod.key_path.replace(".pub", "")
         if pod.key_path.endswith(".pub")
         else pod.key_path
     )
 
-    # Copy docker-compose file to remote instance
     scp_cmd = [
         "scp",
         "-i",
@@ -429,7 +397,6 @@ def _provision_with_docker(pod: Pod, config: Dict[str, Any]) -> bool:
         print(f"Failed to copy Docker Compose file: {scp_result.stderr}")
         return False
 
-    # Connect to instance and run docker-compose up
     ssh_cmd = [
         "ssh",
         "-i",

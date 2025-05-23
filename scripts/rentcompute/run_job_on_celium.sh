@@ -61,11 +61,38 @@ else
   echo 'Venv .venv/bin not found in ~/tplr-ai-local. Environment setup might be incomplete.'
 fi
 echo 'Current PATH: \$PATH'
-echo 'Which wandb: $(which wandb || echo "wandb not found in PATH")'
-echo 'Starting wandb agent: $RENTCOMPUTE_WANDB_AGENT'
-wandb agent '$RENTCOMPUTE_WANDB_AGENT' 
-AGENT_EXIT_CODE=\$?
-echo \"W\&B agent finished with exit code: \$AGENT_EXIT_CODE.\"
+echo 'Which wandb: \$(which wandb || echo \"wandb not found in PATH\")'
+
+AGENT_LIST_STR=\"\$RENTCOMPUTE_WANDB_AGENT_LIST\"
+if [ -n \"\$AGENT_LIST_STR\" ]; then
+  echo \"Found W\&B agent list: \$AGENT_LIST_STR\"
+  # Use a loop for POSIX sh compatibility if needed, Bash 4+ can use read -a
+  # This approach is more portable:
+  OLD_IFS=\"\$IFS\"
+  IFS=','
+  AGENT_COUNT=0
+  TOTAL_AGENTS=\$(echo \"\$AGENT_LIST_STR\" | awk -F, '{print NF}')
+  CURRENT_AGENT_NUM=0
+  for AGENT_ID_TO_RUN in \$AGENT_LIST_STR; do
+    CURRENT_AGENT_NUM=\$((CURRENT_AGENT_NUM + 1))
+    IFS=\"\$OLD_IFS\" # Restore IFS for commands within the loop
+    echo \"Starting W\&B agent (\$CURRENT_AGENT_NUM/\$TOTAL_AGENTS): \$AGENT_ID_TO_RUN\"
+    wandb agent \"\$AGENT_ID_TO_RUN\"
+    AGENT_EXIT_CODE=\$?
+    echo \"W\&B agent \$AGENT_ID_TO_RUN finished with exit code: \$AGENT_EXIT_CODE.\"
+    if [ \$AGENT_EXIT_CODE -ne 0 ]; then
+       echo \"Error: Agent \$AGENT_ID_TO_RUN failed with exit code \$AGENT_EXIT_CODE. Stopping further agents in the list.\"
+       # Optionally, exit the script if one agent fails:
+       # exit \$AGENT_EXIT_CODE
+    fi
+    AGENT_COUNT=\$((AGENT_COUNT + 1))
+    IFS=',' # Re-set IFS for the loop
+  done
+  IFS=\"\$OLD_IFS\"
+  echo \"All \$AGENT_COUNT W\&B agents in the list have been processed.\"
+else
+  echo 'No RENTCOMPUTE_WANDB_AGENT_LIST provided. No W\&B agents will be run by this script.'
+fi
 "
 
 REMOTE_COMMAND_SEQUENCE="set -e; echo '--- Starting Remote Execution (Main SSH Session) ---'; "
@@ -83,52 +110,51 @@ if [ -f "$EXPANDED_LOCAL_DATASET_TAR_PATH" ]; then
 else
   echo "Local dataset tarball '$EXPANDED_LOCAL_DATASET_TAR_PATH' not found. Will attempt remote tokenization."
   
-  # Construct the command string for remote execution carefully
   PRETOKENIZE_CMD="echo 'Local dataset.tar not found. Attempting to run pretokenize_data.py on remote server.'; "
   PRETOKENIZE_CMD+="echo 'Running pretokenize_data.py script using venv python with retries...'; "
   
-  # Retry logic for pretokenization
   PRETOKENIZE_CMD+="MAX_RETRIES=5; "
   PRETOKENIZE_CMD+="RETRY_COUNT=0; "
   PRETOKENIZE_CMD+="SUCCESS=false; "
-  PRETOKENIZE_CMD+="echo 'Max retries for pretokenization: \$MAX_RETRIES'; " # Log max_retries
+  PRETOKENIZE_CMD+="echo 'Max retries for pretokenization: \$MAX_RETRIES'; " 
   PRETOKENIZE_CMD+="while [ \"\$RETRY_COUNT\" -lt \"\$MAX_RETRIES\" ]; do "
   PRETOKENIZE_CMD+="  echo \"Attempt \$((RETRY_COUNT + 1))/\$MAX_RETRIES to run pretokenize_data.py...\"; "
   PRETOKENIZE_CMD+="  if (cd ~/tplr-ai-local/ && ~/tplr-ai-local/.venv/bin/python scripts/pretokenize_data.py && cd ~); then "
   PRETOKENIZE_CMD+="    echo 'Pretokenize script successful (or skipped due to existing data) on attempt \$((RETRY_COUNT + 1)).'; "
   PRETOKENIZE_CMD+="    SUCCESS=true; "
-  PRETOKENIZE_CMD+="    break; " # Exit the while loop
+  PRETOKENIZE_CMD+="    break; " 
   PRETOKENIZE_CMD+="  else "
-  PRETOKENIZE_CMD+="    SCRIPT_EXIT_CODE=\$?; " # Capture exit code of the subshell
+  PRETOKENIZE_CMD+="    SCRIPT_EXIT_CODE=\$?; " 
   PRETOKENIZE_CMD+="    echo 'Pretokenize script failed on attempt \$((RETRY_COUNT + 1)) with exit code \$SCRIPT_EXIT_CODE.'; "
   PRETOKENIZE_CMD+="    RETRY_COUNT=\$((RETRY_COUNT + 1)); "
   PRETOKENIZE_CMD+="    if [ \"\$RETRY_COUNT\" -lt \"\$MAX_RETRIES\" ]; then "
   PRETOKENIZE_CMD+="      echo 'Retrying in 15 seconds...'; "
   PRETOKENIZE_CMD+="      sleep 15; "
   PRETOKENIZE_CMD+="    fi; "
-  PRETOKENIZE_CMD+="  fi; " # End of if/else for command execution
-  PRETOKENIZE_CMD+="done; " # End of while loop
+  PRETOKENIZE_CMD+="  fi; " 
+  PRETOKENIZE_CMD+="done; " 
   
   PRETOKENIZE_CMD+="if [ \"\$SUCCESS\" = false ]; then "
   PRETOKENIZE_CMD+="  echo 'Error: Pretokenize script failed after \$MAX_RETRIES attempts.'; "
-  PRETOKENIZE_CMD+="  exit 1; " # This will terminate the remote command sequence due to 'set -e' at the start of REMOTE_COMMAND_SEQUENCE
+  PRETOKENIZE_CMD+="  exit 1; " 
   PRETOKENIZE_CMD+="else "
-  PRETOKENIZE_CMD+="  echo 'Pretokenization step completed.'; " # Covers success or skip
+  PRETOKENIZE_CMD+="  echo 'Pretokenization step completed.'; " 
   PRETOKENIZE_CMD+="fi; "
   
   REMOTE_COMMAND_SEQUENCE+="$PRETOKENIZE_CMD"
 fi
 
-if [ -n "${RENTCOMPUTE_WANDB_AGENT:-}" ]; then
-  echo "W&B Agent ID ('$RENTCOMPUTE_WANDB_AGENT') provided. Will run agent in background."
-  REMOTE_COMMAND_SEQUENCE+="echo '--- Post-setup: Launching W\&B Agent in Background ---'; "
+# Check if RENTCOMPUTE_WANDB_AGENT_LIST is set and non-empty
+if [ -n "${RENTCOMPUTE_WANDB_AGENT_LIST:-}" ]; then
+  echo "W&B Agent ID list ('$RENTCOMPUTE_WANDB_AGENT_LIST') provided. Will run agents sequentially in background."
+  REMOTE_COMMAND_SEQUENCE+="echo '--- Post-setup: Launching W\&B Agents Sequentially in Background ---'; "
   REMOTE_COMMAND_SEQUENCE+="printf '%s' \"${JOB_EXECUTION_SCRIPT_CONTENT}\" > ~/run_job_background.sh; "
   REMOTE_COMMAND_SEQUENCE+="chmod +x ~/run_job_background.sh; "
   REMOTE_COMMAND_SEQUENCE+="echo 'Launching ~/run_job_background.sh with nohup... Output will be in ${LOG_FILE_REMOTE}'; "
   REMOTE_COMMAND_SEQUENCE+="nohup ~/run_job_background.sh > ${LOG_FILE_REMOTE} 2>&1 & "
 else
-  echo "No RENTCOMPUTE_WANDB_AGENT set. Server will remain running after initial setup."
-  REMOTE_COMMAND_SEQUENCE+="echo 'Environment and data setup complete. No background job (W\&B agent) to run.' ;"
+  echo "No RENTCOMPUTE_WANDB_AGENT_LIST set. Server will remain running after initial setup."
+  REMOTE_COMMAND_SEQUENCE+="echo 'Environment and data setup complete. No background job (W\&B agent list) to run.' ;"
 fi
 
 REMOTE_COMMAND_SEQUENCE+="echo '--- Remote Execution (Main SSH Session) Finished ---'; "
@@ -143,8 +169,8 @@ ssh -p "$RENTCOMPUTE_POD_PORT" -i "$PRIVATE_KEY_PATH" -o StrictHostKeyChecking=n
   "$REMOTE_COMMAND_SEQUENCE"
 
 echo "--- Remote provisioning/job script wrapper finished. ---"
-if [ -n "${RENTCOMPUTE_WANDB_AGENT:-}" ]; then
-  echo "The W&B agent has been launched in the background on the remote server."
-  echo "Monitor its progress by SSHing into the server and checking the log file: tail -f ${LOG_FILE_REMOTE}"
+if [ -n "${RENTCOMPUTE_WANDB_AGENT_LIST:-}" ]; then
+  echo "The W&B agents have been launched sequentially in the background on the remote server."
+  echo "Monitor their progress by SSHing into the server and checking the log file: tail -f ${LOG_FILE_REMOTE}"
 fi
 echo "Your local rentcompute command can now exit."

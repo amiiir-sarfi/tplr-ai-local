@@ -3,7 +3,7 @@ Provision command implementation.
 """
 
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from rentcompute.config import Config
 from rentcompute.provisioning import provision_instance
@@ -15,8 +15,8 @@ def run(
     config: Config, 
     instance_id: str, 
     skip_confirmation: bool = False,
-    wandb_agent: Optional[str] = None,      # New argument
-    local_env_path: Optional[str] = None    # New argument
+    wandb_agents: Optional[List[str]] = None, # Changed from wandb_agent, now a list
+    local_env_path: Optional[str] = None    
 ) -> None:
     """Run the provision command to provision an existing instance.
 
@@ -24,15 +24,13 @@ def run(
         config: Configuration manager
         instance_id: ID of the instance to provision
         skip_confirmation: Whether to skip the confirmation prompt
-        wandb_agent: Optional W&B agent ID to run (passed to provisioning script).
+        wandb_agents: Optional list of W&B agent IDs to run (passed to provisioning script).
         local_env_path: Optional path to local .env file (passed to provisioning script).
     """
-    # Get the provider from config
     provider = config.get_provider()
 
     print(f"Looking up instance with ID: {instance_id}...")
 
-    # List all pods and find the one with the matching ID
     pods = provider.list_pods()
     target_pod = None
 
@@ -51,11 +49,10 @@ def run(
     print(f"GPU: {target_pod.gpu_count}x {target_pod.gpu_type}")
     print(f"Hourly rate: ${target_pod.hourly_rate:.2f}/hr")
 
-    # Ask for confirmation unless skipped
     if not skip_confirmation:
         confirm_message = "Provision this instance?"
-        if wandb_agent:
-            confirm_message += f" This will also attempt to run W&B agent '{wandb_agent}'."
+        if wandb_agents and len(wandb_agents) > 0:
+            confirm_message += f" This will also attempt to run W&B agent(s) '{', '.join(wandb_agents)}' sequentially."
         confirm_message += " (y/n): "
         confirm = input(confirm_message)
         if confirm.lower() != "y":
@@ -63,28 +60,25 @@ def run(
             return
     else:
         print("Skipping confirmation due to -y/--yes flag.")
-        if wandb_agent:
-            print(f"Will attempt to run W&B agent '{wandb_agent}' as part of provisioning.")
+        if wandb_agents and len(wandb_agents) > 0:
+            print(f"Will attempt to run W&B agent(s) '{', '.join(wandb_agents)}' sequentially as part of provisioning.")
 
-
-    # Prepare instance_config_for_script if wandb_agent or local_env_path is provided
     instance_config_for_script: Optional[Dict[str, Any]] = None
-    if wandb_agent or local_env_path: # Check if local_env_path is provided, even if wandb_agent is not
+    # Check if wandb_agents list is not None and not empty, or if local_env_path is provided
+    if (wandb_agents and len(wandb_agents) > 0) or local_env_path:
         instance_config_for_script = {
-            "wandb_agent": wandb_agent,
+            "wandb_agents": wandb_agents if wandb_agents else [], # Ensure it's a list
             "local_env_path": local_env_path
         }
         logger.debug(f"Passing instance_config_for_script to provisioning: {instance_config_for_script}")
 
 
-    # Provision the instance
     print(
         "\nProvisioning requested. Looking for .rentcompute.yml in current directory..."
     )
     if provision_instance(target_pod, instance_config_for_script=instance_config_for_script):
-        print("Provisioning process completed.") # Script will indicate success/failure
+        print("Provisioning process completed.") 
 
-        # Reprint SSH connection details
         private_key_path = (
             target_pod.key_path.replace(".pub", "")
             if target_pod.key_path.endswith(".pub")

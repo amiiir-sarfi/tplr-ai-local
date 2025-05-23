@@ -2,16 +2,17 @@
 set -euo pipefail
 
 TARGET_POD_ID=""
-WANDB_AGENT_ID=""
+WANDB_AGENTS_STRING_INPUT="" # To store the space-separated input
 LOCAL_ENV_FILE_PATH="$HOME/tplr-ai-local/.env" # Default, can be overridden
 
 # --- Helper Functions ---
 print_usage() {
-  echo "Usage: $0 -i <POD_ID> -a <WANDB_AGENT_ID> [-e <LOCAL_ENV_FILE_PATH>]"
-  echo "  -i <POD_ID>               : The ID of the target Celium pod (from 'rentcompute list')."
-  echo "  -a <WANDB_AGENT_ID>       : The W&B sweep/agent ID to run."
-  echo "  -e <LOCAL_ENV_FILE_PATH>  : Optional path to the local .env file to be copied to the pod."
-  echo "                              Defaults to '$LOCAL_ENV_FILE_PATH'."
+  echo "Usage: $0 -i <POD_ID> -a <WANDB_AGENT_LIST_SPACE_SEPARATED> [-e <LOCAL_ENV_FILE_PATH>]"
+  echo "  -i <POD_ID>                             : The ID of the target Celium pod (from 'rentcompute list')."
+  echo "  -a <WANDB_AGENT_LIST_SPACE_SEPARATED>   : Space-separated list of W&B sweep/agent IDs to run sequentially."
+  echo "                                            If providing multiple, enclose in quotes: \"id1 id2 id3\"."
+  echo "  -e <LOCAL_ENV_FILE_PATH>                : Optional path to the local .env file to be copied to the pod."
+  echo "                                            Defaults to '$LOCAL_ENV_FILE_PATH'."
   echo
   echo "If POD_ID is not provided, active instances will be listed."
 }
@@ -23,7 +24,7 @@ while getopts ":i:a:e:h" opt; do
       TARGET_POD_ID=$OPTARG
       ;;
     a )
-      WANDB_AGENT_ID=$OPTARG
+      WANDB_AGENTS_STRING_INPUT=$OPTARG
       ;;
     e )
       LOCAL_ENV_FILE_PATH=$OPTARG
@@ -56,16 +57,20 @@ if [ -z "$TARGET_POD_ID" ]; then
   exit 1
 fi
 
-if [ -z "$WANDB_AGENT_ID" ]; then
-  read -r -p "Please enter the W&B Agent ID to run: " WANDB_AGENT_ID
-  if [ -z "$WANDB_AGENT_ID" ]; then
-    echo "Error: W&B Agent ID is required."
+if [ -z "$WANDB_AGENTS_STRING_INPUT" ]; then
+  read -r -p "Please enter the W&B Agent ID list (space-separated) to run: " WANDB_AGENTS_STRING_INPUT
+  if [ -z "$WANDB_AGENTS_STRING_INPUT" ]; then
+    echo "Error: W&B Agent ID list is required."
     exit 1
   fi
 fi
 
+# Convert space-separated string to comma-separated for the backend script
+export RENTCOMPUTE_WANDB_AGENT_LIST=$(echo "$WANDB_AGENTS_STRING_INPUT" | tr ' ' ',')
+
 echo "--- Preparing to run job on Pod ID: $TARGET_POD_ID ---"
-echo "W&B Agent ID: $WANDB_AGENT_ID"
+echo "W&B Agent IDs (space-separated input): $WANDB_AGENTS_STRING_INPUT"
+echo "W&B Agent IDs (comma-separated for script): $RENTCOMPUTE_WANDB_AGENT_LIST"
 echo "Local .env file: $LOCAL_ENV_FILE_PATH"
 
 # --- Fetch Pod Details using rentcompute list ---
@@ -81,18 +86,11 @@ fi
 
 echo "Found pod info line: $pod_info_line"
 
-# Parse the line. Assuming fixed column order from 'rentcompute list'
-# Name | ID | Host | User | Port | Status | GPU Type | GPU Count | Price ($/hr) | SSH Command
-# $1   | $2 | $3   | $4   | $5   | $6     | $7       | $8        | $9           | $10 (approx)
-
-# More robust parsing of fields:
 export RENTCOMPUTE_POD_HOST=$(echo "$pod_info_line" | awk -F ' *\\| *' '{gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3}')
 export RENTCOMPUTE_POD_USER=$(echo "$pod_info_line" | awk -F ' *\\| *' '{gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4}')
 export RENTCOMPUTE_POD_PORT=$(echo "$pod_info_line" | awk -F ' *\\| *' '{gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5}')
 SSH_COMMAND_FULL=$(echo "$pod_info_line" | awk -F ' *\\| *' '{gsub(/^[ \t]+|[ \t]+$/, "", $10); print $10}')
 
-# Extract private key path from the SSH command string
-# This uses grep with Perl-compatible regex (-P) to look for '-i ' and capture what follows until a space.
 PRIVATE_KEY_FROM_CMD=$(echo "$SSH_COMMAND_FULL" | grep -oP -- '-i \K[^ ]+')
 if [ -z "$PRIVATE_KEY_FROM_CMD" ]; then
   echo "Error: Could not parse SSH private key path from 'rentcompute list' output."
@@ -100,20 +98,18 @@ if [ -z "$PRIVATE_KEY_FROM_CMD" ]; then
   exit 1
 fi
 export RENTCOMPUTE_POD_KEY="$PRIVATE_KEY_FROM_CMD"
-export RENTCOMPUTE_WANDB_AGENT="$WANDB_AGENT_ID"
-export RENTCOMPUTE_LOCAL_ENV_PATH="$LOCAL_ENV_FILE_PATH" # This is passed to run_job_on_celium.sh
+# RENTCOMPUTE_WANDB_AGENT_LIST is already exported above
+export RENTCOMPUTE_LOCAL_ENV_PATH="$LOCAL_ENV_FILE_PATH"
 
 echo "--- Environment Variables Set ---"
 echo "RENTCOMPUTE_POD_HOST: $RENTCOMPUTE_POD_HOST"
 echo "RENTCOMPUTE_POD_USER: $RENTCOMPUTE_POD_USER"
 echo "RENTCOMPUTE_POD_PORT: $RENTCOMPUTE_POD_PORT"
 echo "RENTCOMPUTE_POD_KEY: $RENTCOMPUTE_POD_KEY"
-echo "RENTCOMPUTE_WANDB_AGENT: $RENTCOMPUTE_WANDB_AGENT"
+echo "RENTCOMPUTE_WANDB_AGENT_LIST (for script): $RENTCOMPUTE_WANDB_AGENT_LIST"
 echo "RENTCOMPUTE_LOCAL_ENV_PATH: $RENTCOMPUTE_LOCAL_ENV_PATH"
 echo "---------------------------------"
 
-# Now, execute the main job script
-# This script assumes run_job_on_celium.sh is in the same directory or in PATH
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 JOB_SCRIPT_PATH="$SCRIPT_DIR/run_job_on_celium.sh"
 
