@@ -1,5 +1,6 @@
-name: demo_sweep
-project:  Demo150M_3.7B_Sharded
+
+name: DemoDiloco_Momentum_noSign
+project:  DemoDiloco150M_3.7B_Sharded
 method: grid
 program: neurons/torch_baseline_sharded.py
 command:
@@ -17,34 +18,65 @@ parameters:
   sequence_length:
     value: 2048
   micro_batch_size:
-    value: -1 # -1 means use batch_size
+    value: -1 # -1 means use batch size
+
   # Model params
   hparams_file:
     value: $HOME/tplr-ai-local/hparams/150M/150M_model_hparams.json
   use_compile:
     value: True
+
   # run params
   run_name:
-    value: demo
+    value: demodiloco
   strategy:
-    value: normal
+    value: diloco
+  inner_optimizer:
+    value: adamw
   outer_optimizer:
     value: demo
-
-  ### Important parameters
   batch_size:
     values: 
     # - 8 # With workers=8, bs=8, seqlen=2048 => effective_bs=2**17
     - 32 # With workers=8, bs=32, seqlen=2048 => effective_bs=2**19
   compression_decay:
     value: 0.999
-  outer_learning_rate:
-    value: 1e-3
+  warmup_steps:
+    value: 750
   weight_decay:
     value: 0.1
-  compression_decay:
-    value: 0.999
 
-  warmup_steps:
+  ### Important parameters
+  inner_steps:
+    value: 10
+  inner_learning_rate:
+    values:
+      - 6e-4
+      - 1e-3
+      - 1e-4
+
+  outer_learning_rate:
+    values:
+      - 0.1
+      - 0.3
+      - 0.5
+      - 0.7
+      - 0.9
+      - 1e-2
+      - 3e-2
+      - 5e-2
+      - 7e-2
+      - 9e-2
+
+  # sign no_momentum parameters:
+  outer_nesterov:
     values: 
-    - 750
+    - False
+    - True 
+  outer_use_sign:
+    value: 0 # False
+  outer_momentum:
+    values: 
+    - 0.9
+    - 0.99
+    - 0.999

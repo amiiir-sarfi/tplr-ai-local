@@ -1,0 +1,56 @@
+name: DilocoNesterovBaseline
+project: DemoDiloco150M_3.7B_Sharded
+method: grid
+program: neurons/torch_baseline_sharded.py
+command:
+  - /usr/bin/env
+  - torchrun
+  - --nproc_per_node=8
+  - ${program}
+  - ${args_no_boolean_flags}
+
+parameters:
+  # Fixed parameters from original sweep
+  token_budget:
+    value: 3774873600
+  sequence_length:
+    value: 2048
+  micro_batch_size:
+    value: -1
+  hparams_file:
+    value: $HOME/tplr-ai-local/hparams/150M/150M_model_hparams.json
+  use_compile:
+    value: True
+  strategy:
+    value: diloco
+  inner_optimizer:
+    value: adamw
+  batch_size:
+    value: 32
+  weight_decay:
+    value: 0.1
+  inner_steps:
+    value: 10
+  inner_learning_rate:
+    values: 
+    - 1e-3
+    - 6e-4
+
+  # DeMo specific SGD variant (c)
+  run_name:
+    value: nesterov_baseline
+  outer_optimizer:
+    value: nesterov # Momentum and nesterov are both hardcoded as 0.9 and True respectively
+
+  outer_learning_rate:
+    values: 
+    - 0.1
+    - 0.3
+    - 0.5
+    - 0.7
+    - 0.9
+
+  # Parameters to sweep
+  warmup_steps:
+    values:
+    - 750
