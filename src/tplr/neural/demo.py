@@ -27,6 +27,10 @@ class DeMo(torch.optim.SGD):
         nesterov: bool = False,
         weight_decay: float = 0.0,
         use_sign: bool = False,
+        use_grad_normalization: bool = False,
+        use_quantization: bool = False,
+        quantization_bins: int = 256,
+        quantization_range: int = 6,
         process_group: Optional[dist.ProcessGroup] = None,
         **kwargs,
     ):
@@ -47,6 +51,8 @@ class DeMo(torch.optim.SGD):
         self.process_group = process_group
         self.weight_decay = weight_decay
         self.use_sign = use_sign
+        self.use_grad_normalization = use_grad_normalization
+        self.use_quantization = use_quantization
 
         if self.compression_topk <= 0:
             raise ValueError("topk_size has to be positive")
@@ -63,7 +69,7 @@ class DeMo(torch.optim.SGD):
 
         self.default_dtype = self._find_dtype()
         self.transform = TransformDCT(self.param_groups, self.compression_chunk)
-        self.compress = CompressDCT()
+        self.compress = CompressDCT(use_quantization, quantization_bins, quantization_range)
 
     def _find_dtype(self):
         for group in self.param_groups:
@@ -136,13 +142,13 @@ class DeMo(torch.optim.SGD):
                 state["delta"].add_(p.grad, alpha=lr)
 
                 # Compress delta
-                sparse_idx, sparse_val, xshape, totalk = self.compress.compress(
+                sparse_idx, sparse_val, xshape, totalk, quant_params_local = self.compress.compress(
                     self.transform.encode(state["delta"]), self.compression_topk
                 )
 
                 # Estimate transmitted delta
                 transmit_grad = self.transform.decode(
-                    self.compress.decompress(p, sparse_idx, sparse_val, xshape, totalk)
+                    self.compress.decompress(p, sparse_idx, sparse_val, xshape, totalk, quant_params_local)
                 )
 
                 # Remove transmitted from delta
@@ -158,7 +164,7 @@ class DeMo(torch.optim.SGD):
 
                 # Decode grad from all nodes
                 new_grad = self.transform.decode(
-                    self.compress.batch_decompress(p, sparse_idx_gather, sparse_val_gather, xshape, totalk)
+                    self.compress.batch_decompress(p, sparse_idx_gather, sparse_val_gather, xshape, totalk, quant_params_local, self.use_grad_normalization)
                 )
 
                 # Set grad to values
@@ -265,8 +271,18 @@ class TransformDCT:
 
 class CompressDCT:
     @torch.no_grad()
-    def __init__(self):
-        pass
+    def __init__(
+        self,
+        use_quantization: bool = False,
+        quantization_bins: int = 256,
+        quantization_range: int = 6,
+    ):
+        self.use_quantization = use_quantization
+        if self.use_quantization:
+            self.n_bins = quantization_bins
+            self.range_in_sigmas = (
+                quantization_range  # Quantization range in standard deviations
+            )
 
     def _clamp_topk(self, x, topk):
         if topk > x.shape[-1]:
@@ -285,20 +301,38 @@ class CompressDCT:
         totalk = x.shape[-1]
         topk = self._clamp_topk(x, topk)
 
-        idx = torch.topk(x.abs(), k=topk, dim=-1, largest=True, sorted=False).indices
-        val = torch.gather(x, dim=-1, index=idx)
+        idx_int64 = torch.topk(
+            x.abs(), k=topk, dim=-1, largest=True, sorted=False
+        ).indices
+        val = torch.gather(x, dim=-1, index=idx_int64)
 
-        return idx, val, xshape, totalk
+        # Apply 8-bit quantization if enabled
+        if self.use_quantization:
+            idx = idx_int64.to(torch.int16)
+            idx = idx.to(torch.int64)  # Ensure idx is int64 for NCCL errors
+            val, quant_params = self._quantize_values(val)
+        else:
+            idx = idx_int64
+            quant_params = None
+
+        return idx, val, xshape, totalk, quant_params
 
     @torch.no_grad()
-    def decompress(self, p, idx, val, xshape, totalk):
+    def decompress(self, p, idx, val, xshape, totalk, quantize_params=None):
+        # Dequantize if values were quantized
+        if self.use_quantization and quantize_params is not None:
+            val = self._dequantize_values(val, quantize_params)
+
         x = torch.zeros(xshape, device=p.device, dtype=p.dtype)
 
         if len(xshape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
 
-        # TODO: Careful, this is nondeterministic across different CUDA devices! might cause errors to accumulate between nodes!
-        x.scatter_reduce_(dim=-1, index=idx, src=val, reduce="mean", include_self=False).reshape(xshape)
+        # Cast back to int64 before using scatter/gather
+        idx_int64 = idx.to(torch.int64)
+        x.scatter_reduce_(
+            dim=-1, index=idx_int64, src=val, reduce="mean", include_self=False
+        ).reshape(xshape)
 
         if len(x.shape) > 2:  # 2D weights
             x = rearrange(x, "y x (h w) -> y x h w", h=xshape[2])
@@ -306,10 +340,142 @@ class CompressDCT:
         return x
 
     @torch.no_grad()
-    def batch_decompress(self, p, idx, val, xshape, totalk):
-        idx = torch.concatenate(idx, dim=-1).to(device=p.device)
-        val = torch.concatenate(val, dim=-1).to(device=p.device)
-        return self.decompress(p, idx, val, xshape, totalk)
+    def batch_decompress(
+        self, p, idx, val, xshape, totalk, quantize_params=None, normalise=True
+    ):
+        """
+        Decompress multiple tensors in batch mode.
+        """
+        # Ensure idx and val are lists
+        if not isinstance(idx, list):
+            idx = [idx]
+        if not isinstance(val, list):
+            val = [val]
+
+        # Handle quantization parameters
+        if quantize_params is not None:
+            if not isinstance(quantize_params, list):
+                quantize_params = [quantize_params] * len(val)
+
+        # Process values - dequantize if needed
+        processed_vals = []
+        for i in range(len(val)):
+            v = val[i].to(p.device)
+
+            # Dequantize if we have quantization parameters
+            if self.use_quantization and quantize_params and i < len(quantize_params):
+                v = self._dequantize_values(v, quantize_params[i])
+
+            # Apply L2 normalization to this individual tensor's values
+            # Normalize along the last dimension (where top-k was selected)
+            if normalise:
+                eps = 1e-8
+                if len(v.shape) == 3:  # 2D weights
+                    l2_norm = torch.norm(v, p=2, dim=2, keepdim=True)
+                    v = v / (l2_norm + eps)
+                elif len(v.shape) == 2:  # 1D weights (biases)
+                    l2_norm = torch.norm(v, p=2, dim=1, keepdim=True)
+                    v = v / (l2_norm + eps)
+                elif len(v.shape) == 1:  # Single values
+                    l2_norm = torch.norm(v, p=2)
+                    if l2_norm > eps:
+                        v = v / l2_norm
+
+            processed_vals.append(v)
+
+        # Concatenate everything
+        idx_concat = torch.cat([i.to(p.device) for i in idx], dim=-1)
+        val_concat = torch.cat(processed_vals, dim=-1).to(p.dtype)
+
+        # Use decompress without quantization (since we already dequantized)
+        return self.decompress(
+            p, idx_concat, val_concat, xshape, totalk, quantize_params=None
+        )
+
+    @torch.no_grad()
+    def _quantize_values(self, val):
+        """
+        Quantize values to 8-bit representation with statistical approach
+
+        Args:
+            val: Tensor of values to quantize
+
+        Returns:
+            tuple: (quantized_values, quantization_parameters)
+        """
+        # Statistical quantization approach
+        offset = self.n_bins // 2  # 128 for 8-bit
+        shift = val.mean()
+
+        # Center tensor around mean
+        centered_val = val - shift
+
+        # Calculate standard deviation (unbiased)
+        std_unbiased = centered_val.norm() / math.sqrt(centered_val.numel() - 1)
+
+        # Compute scale factor based on standard deviation range
+        scale = self.range_in_sigmas * std_unbiased / self.n_bins
+
+        # Ensure scale is not zero to avoid NaN
+        if scale == 0 or torch.isnan(scale) or torch.isinf(scale):
+            scale = 1.0
+
+        # Quantize to 8-bit representation
+        centered_val = centered_val.to(torch.float32)
+        quantized_val = (
+            (centered_val / scale + offset)
+            .round()
+            .clamp(0, self.n_bins - 1)
+            .to(torch.uint8)
+        )
+
+        # Create lookup table by computing mean values for each bucket
+        device = quantized_val.device
+        sums = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
+        counts = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
+
+        sums.scatter_add_(0, quantized_val.flatten().long(), centered_val.flatten())
+        counts.scatter_add_(
+            0, quantized_val.flatten().long(), torch.ones_like(centered_val.flatten())
+        )
+
+        lookup = torch.where(counts > 0, sums / counts, torch.zeros_like(sums))
+
+        # Store quantization parameters for dequantization
+        orig_dtype = val.dtype
+        quant_params = (shift, scale, offset, lookup, orig_dtype)
+
+        return quantized_val, quant_params
+
+    @torch.no_grad()
+    def _dequantize_values(self, val, quant_params):
+        """
+        Dequantize 8-bit values back to original representation
+
+        Args:
+            val: Quantized uint8 tensor
+            quant_params: Tuple of (shift, scale, offset, lookup, orig_dtype)
+
+        Returns:
+            Dequantized tensor in original dtype
+        """
+        if quant_params is None:
+            return val
+
+        shift, scale, offset, lookup, orig_dtype = quant_params
+
+        # Ensure lookup is on the same device as val
+        if isinstance(lookup, torch.Tensor):
+            lookup = lookup.to(val.device)
+
+        # Convert quantized values back using lookup table
+        dequantized = lookup[val.long()]
+
+        # Apply scale and shift to get back original distribution
+        val = dequantized + shift
+        val = val.to(orig_dtype)
+
+        return val
 
 
 # Code modified and sourced from https://github.com/zh217/torch-dct

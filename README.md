@@ -82,23 +82,23 @@ Use the [run_sweep.sh](./run_sweep.sh) helper script to initiate a W&B sweep and
 cd $TPLR_LOCAL_PATH
 source $TPLR_LOCAL_PATH/.venv/bin/activate
 # 1. baseline Demo (no diloco) -- Loss = 2.83
-./run_sweep hparams/150M/sweeps/normal_demo/token3.7B.yaml - 
+bash ./run_sweep hparams/150M/sweeps/normal_demo/token3.7B.yaml
 
 ### DILOCO:
 # 2. Demo + sign + no_momentum -- Loss=2.97
-./run_sweep hparams/150M/sweeps/diloco/demo_sign.yaml
+bash ./run_sweep hparams/150M/sweeps/diloco/demo_sign.yaml
 
 # 3. Demo + no_sign + no_momentum -- Loss = 2.80
-./run_sweep hparams/150M/sweeps/diloco/demo_nosign.yaml
+bash ./run_sweep hparams/150M/sweeps/diloco/demo_nosign.yaml
 
 # 4. Demo + sign + momentum -- Loss > 4 -- This is under-experimented, first diving into (5) as its more likely to work.
-./run_sweep hparams/150M/sweeps/diloco/demo_momentum_sign.yaml
+bash ./run_sweep hparams/150M/sweeps/diloco/demo_momentum_sign.yaml
 
 # 5. Demo + momentum -- Loss > 4 -- Performance is unexpectedly low given the "no_momentum_no_sign" variant (3) works well. Investigating.
-./run_sweep hparams/150M/sweeps/diloco/demo_momentum_nosign.yaml
+bash ./run_sweep hparams/150M/sweeps/diloco/demo_momentum_nosign.yaml
 
 # 6. baseline Diloco with Nesterov -- Loss = 2.78
-./run_sweep hparams/150M/sweeps/diloco/nesterov_baseline.yaml - 
+bash ./run_sweep hparams/150M/sweeps/diloco/nesterov_baseline.yaml
 ```
 
 ### B. Directly with `torchrun` (Without W&B Sweeps)

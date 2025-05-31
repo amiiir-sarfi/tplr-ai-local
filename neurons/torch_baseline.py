@@ -227,6 +227,14 @@ class AdamBaseline:
                             help='Compression topk for DeMo optimizer')
         parser.add_argument('--compression_chunk', type=int, default=64,
                             help='Compression chunk size for DeMo optimizer')
+        parser.add_argument('--use_grad_normalization', action='store_true',
+                           help='Use gradient normalization for DeMo optimizer')
+        parser.add_argument('--use_quantization', action='store_true',
+                           help='Use quantization for DeMo optimizer')
+        parser.add_argument('--quantization_bins', type=int, default=256,
+                            help='Number of quantization bins')
+        parser.add_argument('--quantization_range', type=int, default=6,
+                            help='Quantization range in standard deviations')
         
         # Dataset args
         parser.add_argument('--token_budget', type=int, default=15728640,
@@ -472,6 +480,10 @@ class AdamBaseline:
                 compression_decay=self.config.compression_decay,
                 compression_topk=self.config.compression_topk,
                 compression_chunk=self.config.compression_chunk,
+                use_grad_normalization=self.config.use_grad_normalization,
+                use_quantization=self.config.use_quantization,
+                quantization_bins=self.config.quantization_bins,
+                quantization_range=self.config.quantization_range,
                 use_sign=bool(self.config.outer_use_sign),
                 process_group=dist.group.WORLD if self.world_size > 1 else None
             )
