@@ -24,6 +24,7 @@ class SimpleAccum(InnerOuterStrategy):
         self.global_rank = global_rank
         self.tokenizer = tokenizer
         self.config = config
+        self.move_to_gpu = not config.data_in_gpu
     
     def inner_step(self, model, loader, inner_optimizer=None, inner_scheduler=None):
         """
@@ -42,8 +43,10 @@ class SimpleAccum(InnerOuterStrategy):
             
         with ddp_context:
             for i, batch in enumerate(loader):                
-                if isinstance(loader, torch.utils.data.DataLoader):
+                if isinstance(loader, torch.utils.data.DataLoader) and not self.move_to_gpu:
                     input_ids = batch
+                elif isinstance(loader, torch.utils.data.DataLoader) and self.move_to_gpu:
+                    input_ids = batch.to(self.device)
                 else:
                     input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
 
@@ -104,6 +107,7 @@ class Diloco(InnerOuterStrategy):
         self.global_rank = global_rank
         self.tokenizer = tokenizer
         self.config = config
+        self.move_to_gpu = not config.data_in_gpu
         
         # Store offloaded parameters
         self.params_offloaded = None
@@ -130,10 +134,13 @@ class Diloco(InnerOuterStrategy):
         
         with ddp_context:
             for i, batch in enumerate(loader):
-                if isinstance(loader, torch.utils.data.DataLoader):
+                if isinstance(loader, torch.utils.data.DataLoader) and not self.move_to_gpu:
                     input_ids = batch
+                elif isinstance(loader, torch.utils.data.DataLoader) and self.move_to_gpu:
+                    input_ids = batch.to(self.device)
                 else:
                     input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
+                    
                 labels = input_ids.clone()
                 labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
                 

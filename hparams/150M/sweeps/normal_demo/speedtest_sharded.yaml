@@ -28,6 +28,8 @@ parameters:
   # Batch size
   token_budget:
     value: 15728640 # effective_bs=(32 * 4 * 2048 = 2**17) * iterations=120
+  data_in_gpu:
+    value: True 
   micro_batch_size:
     value: -1
   batch_size:

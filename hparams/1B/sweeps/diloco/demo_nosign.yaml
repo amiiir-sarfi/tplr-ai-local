@@ -1,6 +1,5 @@
-
-name: DemoDiloco_Momentum_Sign
-project:  DemoDiloco150M_3.7B_Sharded
+name: DemoDiloco_1B
+project:  DemoDiloco_1B_noMomentum_noSign # DemoDiloco150M_3.7B_Sharded
 method: grid
 program: neurons/torch_baseline_sharded.py
 command:
@@ -14,16 +13,15 @@ parameters:
   ### Fixed parameters
   # Data params
   token_budget:
-    value: 3774873600 # [effective_bs=2**19 * iterations=7200] OR [2**17 * iterations=28800]
+    # value: 3145728000 # 50 iterations instead
+    value: 9940500480 # [effective_bs=2**22 * H=15 * iterations=158]
   sequence_length:
     value: 2048
-  data_in_gpu:
-    value: True 
   micro_batch_size:
-    value: -1 # -1 means use batch size
+    value: 8 # -1 means use batch size
   # Model params
   hparams_file:
-    value: $HOME/tplr-ai-local/hparams/150M/150M_model_hparams.json
+    value: $HOME/tplr-ai-local/hparams/1B/1B_model_hparams.json
   use_compile:
     value: True
 
@@ -39,40 +37,43 @@ parameters:
   batch_size:
     values: 
     # - 8 # With workers=8, bs=8, seqlen=2048 => effective_bs=2**17
-    - 32 # With workers=8, bs=32, seqlen=2048 => effective_bs=2**19
+    # - 32 # With workers=8, bs=32, seqlen=2048 => effective_bs=2**19
+    - 256 # With workers=8, bs=256, seqlen=2048 => effective_bs=2**22
+
   compression_decay:
     value: 0.999
   warmup_steps:
-    value: 750
+    value: 250
   weight_decay:
     value: 0.1
 
   ### Important parameters
   inner_steps:
-    value: 10
-  inner_learning_rate:
-    values:
-      - 6e-4
-      - 1e-3
-      - 1e-4
+    value: 15
 
   outer_learning_rate:
     values:
-      - 1e-3
-      - 4e-3
-      - 8e-4
-      - 6e-4
-      - 1e-4
+    - 0.9
+    # - 0.7
+
+  inner_learning_rate:
+    values:
+    - 8e-4
+    - 6e-4
+    - 1e-3
 
   # sign no_momentum parameters:
   outer_nesterov:
-    values: 
-    - False
-    - True 
+    value: False 
   outer_use_sign:
-    value: 1 # True
+    value: 0 # False
   outer_momentum:
-    values: 
-    - 0.9
-    - 0.99
-    - 0.999
+    value: 0.0
+
+  # New data parameters:
+  data_in_gpu:
+    value: False 
+  num_workers:
+    value: 0
+  num_prefetch_batches:
+    value: 0

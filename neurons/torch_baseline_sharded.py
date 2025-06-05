@@ -26,6 +26,7 @@ from datetime import datetime
 from collections import defaultdict
 import logging
 import math
+import psutil
 
 # Third party
 import torch
@@ -221,7 +222,13 @@ class AdamBaseline:
                             help='Maximum number of training steps (None for unlimited)')
         parser.add_argument('--seed', type=str, default="adam_baseline",
                             help='Seed for deterministic page selection')
-        
+        parser.add_argument('--data_in_gpu', action='store_true',
+                            help='Keep whole dataset in GPU.')
+        parser.add_argument('--num_workers', type=int, default=0,
+                            help='Number of workers per DDP process for data loading')
+        parser.add_argument('--num_prefetch_batches', type=int, default=0,
+                            help='Number of batches to prefetch for data loading')
+
         # Checkpoint args
         parser.add_argument('--save_path', type=str, default='./checkpoints', 
                             help='Path to save model checkpoints')
@@ -388,6 +395,12 @@ class AdamBaseline:
     
     def _initialize_dataloader(self):
         """Initialize the data loader."""
+        if self.global_rank == 0:
+            # Log memory before dataset creation
+            ram_before = psutil.virtual_memory()
+            tplr.logger.info(f"RAM before dataset creation: {ram_before.used / 1024**3:.2f}GB used, "
+                           f"{ram_before.available / 1024**3:.2f}GB available")
+        
         train_dataset = tplr.sharded_dataset.ShardedGPUDataset(
             shards_path=os.path.expandvars(os.path.expanduser(self.config.shards_path)),
             token_budget=self.config.token_budget,
@@ -396,10 +409,26 @@ class AdamBaseline:
             world_size=self.world_size,
             device=self.device,
             shard_token_size=self.config.shard_token_size,
-            split="train"
+            split="train",
+            reside_in_gpu=self.config.data_in_gpu
         )
-        self.train_loader = tplr.get_sharded_gpu_dataloader(train_dataset, batch_size=self.config.micro_batch_size, shuffle=True)
-    
+        
+        if self.global_rank == 0:
+            # Log memory after dataset creation
+            ram_after = psutil.virtual_memory()
+            tplr.logger.info(f"RAM after dataset creation: {ram_after.used / 1024**3:.2f}GB used, "
+                           f"{ram_after.available / 1024**3:.2f}GB available, "
+                           f"delta: +{(ram_after.used - ram_before.used) / 1024**3:.2f}GB")
+        
+        # prefetch_batches = self.config.inner_steps if self.config.strategy.lower() == "diloco" else 2
+        self.train_loader = tplr.get_sharded_gpu_dataloader(
+            train_dataset, 
+            batch_size=self.config.micro_batch_size, 
+            shuffle=True,
+            num_workers=self.config.num_workers,
+            num_prefetch_batches=self.config.num_prefetch_batches
+        )
+
     def _create_scheduler(self, optimizer, lr):
         """Create a standard scheduler with warmup and cosine annealing."""
         warmup_steps = self.config.warmup_steps

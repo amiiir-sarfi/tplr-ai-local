@@ -17,6 +17,8 @@ parameters:
     value: 3774873600 # [effective_bs=2**19 * iterations=7200] OR [2**17 * iterations=28800]
   sequence_length:
     value: 2048
+  data_in_gpu:
+    value: True 
   micro_batch_size:
     value: -1 # -1 means use batch size
   # Model params
