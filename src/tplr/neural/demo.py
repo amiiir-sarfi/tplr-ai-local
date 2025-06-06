@@ -27,6 +27,7 @@ class DeMo(torch.optim.SGD):
         nesterov: bool = False,
         weight_decay: float = 0.0,
         use_sign: bool = False,
+        grad_val_multiplier: float = 1.0,
         use_grad_normalization: bool = False,
         use_quantization: bool = False,
         quantization_bins: int = 256,
@@ -53,7 +54,8 @@ class DeMo(torch.optim.SGD):
         self.use_sign = use_sign
         self.use_grad_normalization = use_grad_normalization
         self.use_quantization = use_quantization
-
+        self.grad_val_multiplier = grad_val_multiplier
+        
         if self.compression_topk <= 0:
             raise ValueError("topk_size has to be positive")
         if self.compression_chunk <= 0:
@@ -145,6 +147,7 @@ class DeMo(torch.optim.SGD):
                 sparse_idx, sparse_val, xshape, totalk, quant_params_local = self.compress.compress(
                     self.transform.encode(state["delta"]), self.compression_topk
                 )
+                sparse_val *= self.grad_val_multiplier
 
                 # Estimate transmitted delta
                 transmit_grad = self.transform.decode(

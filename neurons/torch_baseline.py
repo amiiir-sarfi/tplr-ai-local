@@ -26,6 +26,7 @@ from datetime import datetime
 from collections import defaultdict
 import logging
 import math
+import json
 
 # Third party
 import torch
@@ -165,6 +166,14 @@ class Timer:
                 
         return result
 
+def dict_parser_type(value):
+    """Helper function to parse a JSON string into a dict for argparse."""
+    try:
+        value = value.replace("'", '"') 
+        loaded_dict = json.loads(value)
+        return loaded_dict 
+    except json.JSONDecodeError:
+        raise argparse.ArgumentTypeError(f"Invalid JSON format for dictionary: {value}")
 
 class AdamBaseline:
     """
@@ -186,19 +195,27 @@ class AdamBaseline:
         parser.add_argument('--num_gpus', type=int, default=torch.cuda.device_count(), 
                             help='Number of GPUs to use for distributed training')
         
+        # Strategy args
+        parser.add_argument('--strategy', type=str, default='diloco', choices=['normal', 'diloco'],
+                            help='Training strategy to use (normal or diloco)')
+        parser.add_argument("--anomalies", type=dict_parser_type, default={},
+                            help='Dictionary of anomaly configs where keys are the worker idx and values are dictionary of anomalous configs, e.g., {"2": {"val_multiplier": 10}}')
+        parser.add_argument('--grad_val_multiplier', type=int, default=1,
+                            help='Multiplier for gradient vals post compression before communication (to simulate anomalies)')
+
         # Optimizer args
         parser.add_argument('--strategy', type=str, default='diloco', choices=['normal', 'diloco'],
-                           help='Training strategy to use (normal or diloco)')
+                            help='Training strategy to use (normal or diloco)')
         parser.add_argument('--micro_batch_size', type=int, default=16, 
                             help='Micro batches for data loader')
         parser.add_argument('--batch_size', type=int, default=64,
                             help='Batch size for grad accum')
         parser.add_argument('--sequence_length', type=int, default=2048,
-                        help='sequence length for training')    
+                            help='sequence length for training')    
         parser.add_argument('--weight_decay', type=float, default=0.1,
                             help='Weight decay for regularization')
         parser.add_argument('--warmup_steps', type=float, default=250,
-                        help='Number of warmup steps for learning rate scheduler')    
+                            help='Number of warmup steps for learning rate scheduler')    
         
         ## Inner optimizer
         parser.add_argument('--inner_steps', type=int, default=10,
@@ -206,7 +223,7 @@ class AdamBaseline:
         parser.add_argument('--inner_learning_rate', type=float, default=6e-4,
                             help='Learning rate for inner optimizer')
         parser.add_argument('--inner_optimizer', type=str, default=None, choices=['adamw'],
-                           help='inner optimizer to use. None means simple gradient accumulation')
+                            help='inner optimizer to use. None means simple gradient accumulation')
         
         ## Outer optimizer
         parser.add_argument('--outer_learning_rate', type=float, default=0.7,
@@ -218,7 +235,7 @@ class AdamBaseline:
         parser.add_argument('--outer_use_sign', type=int, default=1, choices=[0, 1],
                             help='Use sign for outer optimizer')
         parser.add_argument('--outer_optimizer', type=str, default='demo', choices=['adamw', 'demo', 'nesterov'],
-                           help='Outer optimizer to use for training (adamw or demo or nesterov)')
+                            help='Outer optimizer to use for training (adamw or demo or nesterov)')
         
         # DeMo specific args
         parser.add_argument('--compression_decay', type=float, default=0.999,
@@ -228,9 +245,9 @@ class AdamBaseline:
         parser.add_argument('--compression_chunk', type=int, default=64,
                             help='Compression chunk size for DeMo optimizer')
         parser.add_argument('--use_grad_normalization', action='store_true',
-                           help='Use gradient normalization for DeMo optimizer')
+                            help='Use gradient normalization for DeMo optimizer')
         parser.add_argument('--use_quantization', action='store_true',
-                           help='Use quantization for DeMo optimizer')
+                            help='Use quantization for DeMo optimizer')
         parser.add_argument('--quantization_bins', type=int, default=256,
                             help='Number of quantization bins')
         parser.add_argument('--quantization_range', type=int, default=6,
@@ -256,11 +273,11 @@ class AdamBaseline:
         
         # Timing args
         parser.add_argument('--timing_log', type=str, default='timings.log',
-                           help='File to write timing information to')
+                            help='File to write timing information to')
         
         # torch.compile args
         parser.add_argument('--use_compile', action='store_true',
-                           help='Use torch.compile to optimize model execution')
+                            help='Use torch.compile to optimize model execution')
         
         bt.logging.add_args(parser)
         config = bt.config(parser)
@@ -290,6 +307,16 @@ class AdamBaseline:
             self.config.micro_batch_size = self.config.batch_size
 
         self._setup_distributed()
+
+        for worker_idx, anomaly_config in self.config.anomalies.items():
+            if self.global_rank == int(worker_idx):
+                for anomaly_k,anomaly_v in anomaly_config.items():
+                    if hasattr(self.config, anomaly_k): # CHECKING
+                        original_value = getattr(self.config, anomaly_k)
+                        setattr(self.config, anomaly_k, anomaly_v) # Using setattr here
+                        tplr.logger.info(f"[Rank {self.global_rank}]: Updated self.config.{anomaly_k} from {original_value} to {anomaly_v}")
+                    else:
+                        raise ValueError(f"Anomaly config key '{anomaly_k}' not found in config")
 
         self._calculate_steps_and_pages()
 
@@ -485,6 +512,7 @@ class AdamBaseline:
                 quantization_bins=self.config.quantization_bins,
                 quantization_range=self.config.quantization_range,
                 use_sign=bool(self.config.outer_use_sign),
+                grad_val_multiplier=self.config.grad_val_multiplier,
                 process_group=dist.group.WORLD if self.world_size > 1 else None
             )
         elif self.config.outer_optimizer.lower() == 'adamw':
