@@ -788,8 +788,8 @@ class AdamBaseline:
                 # Update total tokens processed
                 self.total_tokens_processed += batch_tokens
                 
-                # Save checkpoint
-                if window % self.config.save_interval == 0:
+                # Save checkpoint every save_interval windows
+                if (window + 1) % self.config.save_interval == 0 or window == self.config.max_steps - 1:
                     self._save_checkpoint(window)
             else:
                 self.total_tokens_processed += batch_tokens
