@@ -4,21 +4,24 @@ set -euo pipefail
 TARGET_POD_ID=""
 WANDB_AGENTS_STRING_INPUT="" # To store the space-separated input
 LOCAL_ENV_FILE_PATH="$HOME/tplr-ai-local/.env" # Default, can be overridden
+DATASET_TYPE="" # New parameter for dataset type
 
 # --- Helper Functions ---
 print_usage() {
-  echo "Usage: $0 -i <POD_ID> -a <WANDB_AGENT_LIST_SPACE_SEPARATED> [-e <LOCAL_ENV_FILE_PATH>]"
+  echo "Usage: $0 -i <POD_ID> -a <WANDB_AGENT_LIST_SPACE_SEPARATED> [-e <LOCAL_ENV_FILE_PATH>] [-d <DATASET_TYPE>]"
   echo "  -i <POD_ID>                             : The ID of the target Celium pod (from 'rentcompute list')."
   echo "  -a <WANDB_AGENT_LIST_SPACE_SEPARATED>   : Space-separated list of W&B sweep/agent IDs to run sequentially."
   echo "                                            If providing multiple, enclose in quotes: \"id1 id2 id3\"."
   echo "  -e <LOCAL_ENV_FILE_PATH>                : Optional path to the local .env file to be copied to the pod."
   echo "                                            Defaults to '$LOCAL_ENV_FILE_PATH'."
+  echo "  -d <DATASET_TYPE>                       : Optional dataset type. Use 'dclm' for DCLM dataset,"
+  echo "                                            otherwise defaults to fineweb-edu-score-2."
   echo
   echo "If POD_ID is not provided, active instances will be listed."
 }
 
 # --- Argument Parsing ---
-while getopts ":i:a:e:h" opt; do
+while getopts ":i:a:e:d:h" opt; do
   case ${opt} in
     i )
       TARGET_POD_ID=$OPTARG
@@ -28,6 +31,9 @@ while getopts ":i:a:e:h" opt; do
       ;;
     e )
       LOCAL_ENV_FILE_PATH=$OPTARG
+      ;;
+    d )
+      DATASET_TYPE=$OPTARG
       ;;
     h )
       print_usage
@@ -72,6 +78,7 @@ echo "--- Preparing to run job on Pod ID: $TARGET_POD_ID ---"
 echo "W&B Agent IDs (space-separated input): $WANDB_AGENTS_STRING_INPUT"
 echo "W&B Agent IDs (comma-separated for script): $RENTCOMPUTE_WANDB_AGENT_LIST"
 echo "Local .env file: $LOCAL_ENV_FILE_PATH"
+echo "Dataset type: ${DATASET_TYPE:-default (fineweb-edu-score-2)}"
 
 # --- Fetch Pod Details using rentcompute list ---
 echo "Fetching instance details for Pod ID '$TARGET_POD_ID'..."
@@ -100,6 +107,7 @@ fi
 export RENTCOMPUTE_POD_KEY="$PRIVATE_KEY_FROM_CMD"
 # RENTCOMPUTE_WANDB_AGENT_LIST is already exported above
 export RENTCOMPUTE_LOCAL_ENV_PATH="$LOCAL_ENV_FILE_PATH"
+export RENTCOMPUTE_DATASET_TYPE="$DATASET_TYPE"
 
 echo "--- Environment Variables Set ---"
 echo "RENTCOMPUTE_POD_HOST: $RENTCOMPUTE_POD_HOST"
@@ -108,6 +116,7 @@ echo "RENTCOMPUTE_POD_PORT: $RENTCOMPUTE_POD_PORT"
 echo "RENTCOMPUTE_POD_KEY: $RENTCOMPUTE_POD_KEY"
 echo "RENTCOMPUTE_WANDB_AGENT_LIST (for script): $RENTCOMPUTE_WANDB_AGENT_LIST"
 echo "RENTCOMPUTE_LOCAL_ENV_PATH: $RENTCOMPUTE_LOCAL_ENV_PATH"
+echo "RENTCOMPUTE_DATASET_TYPE: $RENTCOMPUTE_DATASET_TYPE"
 echo "---------------------------------"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"

@@ -1,5 +1,5 @@
 # The MIT License (MIT)
-# © 2024 templar.tech
+# © 2025 tplr.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the "Software"), to deal in the Software without restriction, including without limitation
@@ -14,10 +14,16 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
-# fmt: off
 
 # Global imports
 from pydantic import BaseModel
+from pydantic import Field
+
+# Pydantic v2: ConfigDict replaces inner `class Config`
+try:  # v2
+    from pydantic import ConfigDict
+except ImportError:  # v1 fallback – noqa: D401
+    ConfigDict = dict  # type: ignore
 
 
 class Bucket(BaseModel):
@@ -35,10 +41,12 @@ class Bucket(BaseModel):
             return self.dict() == other.dict()
         return False
 
-    name: str
-    account_id: str
-    access_key_id: str
-    secret_access_key: str
-    class Config:
-        str_min_length = 1
-        str_strip_whitespace = True
+    name: str = Field(..., min_length=1)
+    account_id: str = Field(..., min_length=1)
+    access_key_id: str = Field(..., min_length=1)
+    secret_access_key: str = Field(..., min_length=1)
+
+    # v2 style; silently ignored by v1
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+    )

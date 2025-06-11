@@ -1,5 +1,5 @@
 # The MIT License (MIT)
-# © 2024 templar.tech
+# © 2025 tplr.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the "Software"), to deal in the Software without restriction, including without limitation
@@ -14,16 +14,19 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
-# fmt: off
+
+# type: ignore
 
 # Global imports
+import asyncio
 import random
 import typing
-import asyncio
+
 import aiohttp
 import numpy as np
-from transformers import AutoTokenizer
 from torch.utils.data import IterableDataset
+from transformers import AutoTokenizer
+
 
 class SubsetLoader(IterableDataset):
     """
@@ -184,7 +187,7 @@ class SubsetLoader(IterableDataset):
 
 
 class DatasetLoader(SubsetLoader):
-    name: str = "airtrain-ai/fineweb-edu-fortified"
+    name: str = "mlfoundations/dclm-baseline-1.0-parquet"
     rows_base_url: str = "https://datasets-server.huggingface.co/rows"
     size_base_url: str = "https://datasets-server.huggingface.co/size"
 

@@ -53,16 +53,28 @@ The following steps guide you through setting up the local environment.
     ```
 
 4.  **Pre-tokenize Data:**
-    This step prepares the dataset for training (sharding and pretokenization) using [pretokenize_data.py](./scripts/pretokenize_data.py).
+    This step prepares the dataset for training (sharding and pretokenization). Choose between two datasets:
+    
+    **Option A: Default fineweb-edu-score-2 dataset** (using [pretokenize_data.py](./scripts/pretokenize_data.py)):
     ```bash
     # Define the output directory for sharded, tokenized data
     export DATA_SHARDED_DIR="$HOME/datasets/edu_fineweb_score2_10B_tokenized_llama2"
 
     python "${TPLR_LOCAL_PATH}/scripts/pretokenize_data.py"
     ```
+    
+    **Option B: DCLM dataset** (using [pretokenize_data_dclm.py](./scripts/pretokenize_data_dclm.py)):
+    ```bash
+    # Define the output directory for DCLM sharded, tokenized data
+    export DATA_SHARDED_DIR="$HOME/datasets/dclm_tokenized_llama2_cleaned"
+
+    python "${TPLR_LOCAL_PATH}/scripts/pretokenize_data_dclm.py"
+    ```
+    
     **IMPORTANT NOTES:** 
     - If `DATA_SHARDED_DIR` is modified here, ensure the `shards_path` argument in [neurons/torch_baseline_sharded.py](./neurons/torch_baseline_sharded.py) is updated accordingly. 
     - The script might raise an error upon completion even if all shards (e.g., 100) are successfully created; this can often be ignored if the output appears correct.
+    - The DCLM pretokenization script uses multiprocessing and will automatically detect and use 75% of your available CPU cores for faster processing.
 
 ## Running Experiments
 

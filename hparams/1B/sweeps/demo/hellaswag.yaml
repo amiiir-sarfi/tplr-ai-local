@@ -1,0 +1,65 @@
+name: DemoDiloco_1B
+project:  DemoDiloco_1B_noMomentum_noSign
+method: grid
+program: neurons/torch_baseline_sharded.py
+command:
+  - /usr/bin/env
+  - torchrun
+  - --nproc_per_node=8 # 8 nodes per GPU
+  - ${program} 
+  - ${args_no_boolean_flags}
+
+parameters:
+  ### Fixed parameters
+  # Data params
+  shards_path:
+    value: $HOME/datasets/dclm_tokenized_llama2_cleaned
+  token_budget:
+    value: 12834570240 # [effective_bs=2**22 * H=15 * iterations=158]
+  sequence_length:
+    value: 2048
+  micro_batch_size:
+    value: 8 # -1 means use batch_size
+  # Model params
+  hparams_file:
+    value: $HOME/tplr-ai-local/hparams/1B/1B_model_hparams.json
+  use_compile:
+    value: True
+
+  # run params
+  run_name:
+    value: demo-only
+  strategy:
+    value: normal
+  outer_optimizer:
+    value: demo
+
+  ### Important parameters
+  batch_size:
+    values: 
+    - 256 # With workers=8, bs=256, seqlen=2048 => effective_bs=2**22
+
+  compression_decay:
+    value: 0.999
+
+  warmup_steps:
+    values: 
+    - 250
+  weight_decay:
+    value: 0.1
+  outer_learning_rate:
+    values: 
+    - 4e-4
+
+  # sign no_momentum parameters:
+  outer_nesterov:
+    value: False 
+  outer_use_sign:
+    value: 1 # True
+  outer_momentum:
+    value: 0.0
+  data_in_gpu:
+    value: False
+
+  save_interval:
+    value: 2

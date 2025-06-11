@@ -119,17 +119,26 @@ if [ -f "$EXPANDED_LOCAL_DATASET_TAR_PATH" ]; then
 else
   echo "Local dataset tarball '$EXPANDED_LOCAL_DATASET_TAR_PATH' not found. Will attempt remote tokenization."
   
-  PRETOKENIZE_CMD="echo 'Local dataset.tar not found. Attempting to run pretokenize_data.py on remote server.'; "
-  PRETOKENIZE_CMD+="echo 'Running pretokenize_data.py script using venv python with retries...'; "
+  # Determine which pretokenization script to use
+  if [ "${RENTCOMPUTE_DATASET_TYPE:-}" = "dclm" ]; then
+    PRETOKENIZE_SCRIPT="scripts/pretokenize_data_dclm.py"
+    echo "Using DCLM dataset - will run $PRETOKENIZE_SCRIPT"
+  else
+    PRETOKENIZE_SCRIPT="scripts/pretokenize_data.py"
+    echo "Using default dataset (fineweb-edu-score-2) - will run $PRETOKENIZE_SCRIPT"
+  fi
+  
+  PRETOKENIZE_CMD="echo 'Local dataset.tar not found. Attempting to run $PRETOKENIZE_SCRIPT on remote server.'; "
+  PRETOKENIZE_CMD+="echo 'Running $PRETOKENIZE_SCRIPT script using venv python with retries...'; "
   
   PRETOKENIZE_CMD+="MAX_RETRIES=5; "
   PRETOKENIZE_CMD+="RETRY_COUNT=0; "
   PRETOKENIZE_CMD+="SUCCESS=false; "
   PRETOKENIZE_CMD+="echo 'Max retries for pretokenization: \${MAX_RETRIES}'; " 
   PRETOKENIZE_CMD+="while [ \"\${RETRY_COUNT}\" -lt \"\${MAX_RETRIES}\" ]; do "
-  PRETOKENIZE_CMD+="  echo \"Attempt \$((RETRY_COUNT + 1))/\${MAX_RETRIES} to run pretokenize_data.py...\"; "
+  PRETOKENIZE_CMD+="  echo \"Attempt \$((RETRY_COUNT + 1))/\${MAX_RETRIES} to run $PRETOKENIZE_SCRIPT...\"; "
   # Use full path to python in venv for pretokenize script
-  PRETOKENIZE_CMD+="  if (cd ~/tplr-ai-local/ && \$HOME/tplr-ai-local/.venv/bin/python scripts/pretokenize_data.py && cd ~); then "
+  PRETOKENIZE_CMD+="  if (cd ~/tplr-ai-local/ && \$HOME/tplr-ai-local/.venv/bin/python $PRETOKENIZE_SCRIPT && cd ~); then "
   PRETOKENIZE_CMD+="    echo 'Pretokenize script successful (or skipped due to existing data) on attempt \$((RETRY_COUNT + 1)).'; "
   PRETOKENIZE_CMD+="    SUCCESS=true; "
   PRETOKENIZE_CMD+="    break; " 
@@ -149,6 +158,17 @@ else
   PRETOKENIZE_CMD+="  exit 1; " 
   PRETOKENIZE_CMD+="else "
   PRETOKENIZE_CMD+="  echo 'Pretokenization step completed.'; " 
+  
+  # Add cleanup step for DCLM dataset
+  if [ "${RENTCOMPUTE_DATASET_TYPE:-}" = "dclm" ]; then
+    PRETOKENIZE_CMD+="  echo 'Running DCLM data cleanup and resharding...'; "
+    PRETOKENIZE_CMD+="  if (cd ~/tplr-ai-local/ && \$HOME/tplr-ai-local/.venv/bin/python scripts/analyze_and_clean_dclm.py && cd ~); then "
+    PRETOKENIZE_CMD+="    echo 'DCLM data cleanup completed successfully.'; "
+    PRETOKENIZE_CMD+="  else "
+    PRETOKENIZE_CMD+="    echo 'Warning: DCLM data cleanup failed, but continuing...'; "
+    PRETOKENIZE_CMD+="  fi; "
+  fi
+  
   PRETOKENIZE_CMD+="fi; "
   
   REMOTE_COMMAND_SEQUENCE+="$PRETOKENIZE_CMD"
@@ -166,7 +186,7 @@ if [ -n "${RENTCOMPUTE_WANDB_AGENT_LIST:-}" ]; then
   # Ensure RENTCOMPUTE_WANDB_AGENT_LIST is available to nohup
   # nohup inherits the environment by default. The issue is if it's not exported or changed.
   # To be explicit:
-REMOTE_COMMAND_SEQUENCE+="export REMOTE_ENV_FILE_DEST=\"${REMOTE_ENV_FILE_DEST}\"; export RENTCOMPUTE_WANDB_AGENT_LIST=\"${RENTCOMPUTE_WANDB_AGENT_LIST}\"; nohup ~/run_job_background.sh > ${LOG_FILE_REMOTE} 2>&1 & "
+REMOTE_COMMAND_SEQUENCE+="export REMOTE_ENV_FILE_DEST=\"${REMOTE_ENV_FILE_DEST}\"; export RENTCOMPUTE_WANDB_AGENT_LIST=\"${RENTCOMPUTE_WANDB_AGENT_LIST}\"; export RENTCOMPUTE_DATASET_TYPE=\"${RENTCOMPUTE_DATASET_TYPE:-}\"; nohup ~/run_job_background.sh > ${LOG_FILE_REMOTE} 2>&1 & "
 
 else
   echo "No RENTCOMPUTE_WANDB_AGENT_LIST set by parent. Server will remain running after initial setup."

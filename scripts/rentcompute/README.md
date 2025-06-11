@@ -36,7 +36,7 @@ This displays available instances matching your criteria without starting them.
 ### Starting a Compute Instance
 
 ```bash
-# Example: Start an H100 instance, provision it, and run a W&B agent
+# Example: Start an H100 instance, provision it, and run a W&B agent with DCLM dataset
 rentcompute start \
 --gpu-min=5 --gpu-max=8 \
 --gpu-type=h100 \
@@ -44,7 +44,11 @@ rentcompute start \
 --provision \
 --ssh-key $HOME/.ssh/id_rsa.pub \
 --wandb-agents "sweep_id_1/agent_id_1" "sweep_id_2/agent_id_2" \
---local-env-path $HOME/tplr-ai-local/.env
+--local-env-path $HOME/tplr-ai-local/.env \
+--dataset dclm
+
+# Start with default fineweb-edu-score-2 dataset
+rentcompute start --gpu-type=h100 --provision --wandb-agents "sweep_id/agent_id"
 
 # Start with specific requirements and custom name
 rentcompute start --name="my-gpu-server" --gpu-min=2 --gpu-max=8 --gpu-type=h100 --price-max=5
@@ -86,16 +90,15 @@ Provisioning allows you to automatically configure new or existing instances.
 
 #### Provisioning During Start
 ```bash
-# Start and provision a new instance, potentially running a job
+# Start and provision a new instance with DCLM dataset
 rentcompute start \
 --gpu-type=h100 \
 --provision \
 --wandb-agent "your_wandb_sweep_id/your_agent_id" \
---local-env-path $HOME/tplr-ai-local/.env
-```
+--local-env-path $HOME/tplr-ai-local/.env \
+--dataset dclm
 
-```bash
-# Start and provision a new instance
+# Start and provision a new instance with default dataset
 rentcompute start --gpu-type=h100 --provision
 ```
 
@@ -105,10 +108,11 @@ rentcompute start --gpu-type=h100 --provision
 # Provision an existing instance (with confirmation)
 rentcompute provision --id <instance-id>
 
-# Provision an existing instance and specify a W&B agent to run
+# Provision an existing instance with DCLM dataset and W&B agents
 rentcompute provision --id <instance-id> \
 --wandb-agents "sweep_id_1/agent_id_1" "sweep_id_2/agent_id_2" \
---local-env-path $HOME/tplr-ai-local/.env
+--local-env-path $HOME/tplr-ai-local/.env \
+--dataset dclm
 
 # Provision without confirmation
 rentcompute provision --id <instance-id> -y
@@ -211,6 +215,10 @@ reload:
 ### Running a Job on an Existing Pod
 To run a wandb sweep on an existing pod, use the following command:
 ```bash
+# Run with DCLM dataset
+./run_sweep_on_existing_pod.sh -i <POD_ID> -a "sweep_id_1/agent_id_1 sweep_id_2/agent_id_2" -d dclm [-e <PATH_TO_LOCAL_.ENV_FILE>]
+
+# Run with default fineweb-edu-score-2 dataset
 ./run_sweep_on_existing_pod.sh -i <POD_ID> -a "sweep_id_1/agent_id_1 sweep_id_2/agent_id_2" [-e <PATH_TO_LOCAL_.ENV_FILE>]
 ```
 To get a list of available pods:
@@ -224,7 +232,7 @@ This script will:
 2. Set up necessary environment variables for run_job_on_celium.sh.
 3. Execute run_job_on_celium.sh on the remote pod. This includes:
   - Running celium_env_setup.sh for environment preparation.
-  - Potentially running scripts/pretokenize_data.py if a local dataset tarball isn't found and the pretokenized data doesn't already exist on the server.
+  - Potentially running scripts/pretokenize_data_dclm.py (if dataset is "dclm") or scripts/pretokenize_data.py (default) if a local dataset tarball isn't found and the pretokenized data doesn't already exist on the server.
   - Launching the specified W&B agent in the background.
 
 ### Stopping Instances

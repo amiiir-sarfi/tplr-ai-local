@@ -79,6 +79,13 @@ def create_parser() -> argparse.ArgumentParser:
         help="Path to local .env file to copy during provisioning if the provisioning script uses it (e.g. with --wandb-agents).",
         default="~/tplr-ai-local/.env",
     )
+    provision_parser.add_argument(
+        "--dataset",
+        dest="dataset_type",
+        type=str,
+        help="Dataset type for pretokenization. Use 'dclm' for DCLM dataset, otherwise defaults to fineweb-edu-score-2.",
+        default="",
+    )
 
     start_parser.add_argument(
         "--name",
@@ -161,6 +168,13 @@ def create_parser() -> argparse.ArgumentParser:
         type=str,
         help="Path to local .env file to copy during provisioning if --wandb-agents are used.",
         default="~/tplr-ai-local/.env",
+    )
+    start_parser.add_argument(
+        "--dataset",
+        dest="dataset_type",
+        type=str,
+        help="Dataset type for pretokenization. Use 'dclm' for DCLM dataset, otherwise defaults to fineweb-edu-score-2.",
+        default="",
     )
 
 
@@ -347,7 +361,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "ssh_key": args.ssh_key,
                 "provision": args.provision,
                 "wandb_agents": args.wandb_agents, # Changed from wandb_agent
-                "local_env_path": args.local_env_path 
+                "local_env_path": args.local_env_path,
+                "dataset_type": args.dataset_type
             }
             start.run(config, instance_config, name=args.name)
         elif args.command == "search":
@@ -376,7 +391,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 args.instance_id, 
                 skip_confirmation=args.yes,
                 wandb_agents=args.wandb_agents, # Changed from wandb_agent
-                local_env_path=args.local_env_path
+                local_env_path=args.local_env_path,
+                dataset_type=args.dataset_type
             )
         elif args.command == "rsync":
             instance_id_to_sync = None
