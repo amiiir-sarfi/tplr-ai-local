@@ -1,4 +1,3 @@
-
 """DeMo: Decoupled Momentum Optimization
 
 This implements the DeMo fused optimizer and data parallel algorithm.
@@ -33,6 +32,7 @@ class DeMo(torch.optim.SGD):
         quantization_bins: int = 256,
         quantization_range: int = 6,
         process_group: Optional[dist.ProcessGroup] = None,
+        clip_controlled_max: float = 15.0,  
         **kwargs,
     ):
         super().__init__(
@@ -55,7 +55,8 @@ class DeMo(torch.optim.SGD):
         self.use_grad_normalization = use_grad_normalization
         self.use_quantization = use_quantization
         self.grad_val_multiplier = grad_val_multiplier
-        
+        self.clip_controlled_max = clip_controlled_max
+
         if self.compression_topk <= 0:
             raise ValueError("topk_size has to be positive")
         if self.compression_chunk <= 0:
@@ -165,9 +166,33 @@ class DeMo(torch.optim.SGD):
                 for si, v in zip(sparse_idx_gather, sparse_val_gather):
                     self.data_receive += si.nbytes + v.nbytes
 
-                # Decode grad from all nodes
+                # Calculate worker norms and derive clipping threshold
+                worker_norms = []
+                for sparse_vals in sparse_val_gather:
+                    # Norm of sparse values from each worker (handle quantized uint8)
+                    worker_norms.append(torch.norm(sparse_vals.float()))
+            
+                stacked_norms = torch.stack(worker_norms)
+                median_norm = torch.median(stacked_norms)
+                
+                # Convert clip_controlled_max to tensor and use torch.max for proper comparison
+                clip_thresh = torch.max(
+                    torch.tensor(self.clip_controlled_max, device=median_norm.device, dtype=median_norm.dtype), 
+                    median_norm
+                )
+                
+                # Decode grad from all nodes with clipping
                 new_grad = self.transform.decode(
-                    self.compress.batch_decompress(p, sparse_idx_gather, sparse_val_gather, xshape, totalk, quant_params_local, self.use_grad_normalization)
+                    self.compress.batch_decompress(
+                        p, 
+                        sparse_idx_gather, 
+                        sparse_val_gather, 
+                        xshape, 
+                        totalk, 
+                        quant_params_local,
+                        normalise=False,  # Disable old normalization
+                        clip_norm_val=clip_thresh  # Use clipping threshold
+                    )
                 )
 
                 # Set grad to values
@@ -344,10 +369,10 @@ class CompressDCT:
 
     @torch.no_grad()
     def batch_decompress(
-        self, p, idx, val, xshape, totalk, quantize_params=None, normalise=True
+        self, p, idx, val, xshape, totalk, quantize_params=None, normalise=True, clip_norm_val=None
     ):
         """
-        Decompress multiple tensors in batch mode.
+        Decompress multiple tensors in batch mode with optional gradient norm clipping.
         """
         # Ensure idx and val are lists
         if not isinstance(idx, list):
@@ -360,7 +385,7 @@ class CompressDCT:
             if not isinstance(quantize_params, list):
                 quantize_params = [quantize_params] * len(val)
 
-        # Process values - dequantize if needed
+        # Process values - dequantize and apply clipping if needed
         processed_vals = []
         for i in range(len(val)):
             v = val[i].to(p.device)
@@ -369,9 +394,15 @@ class CompressDCT:
             if self.use_quantization and quantize_params and i < len(quantize_params):
                 v = self._dequantize_values(v, quantize_params[i])
 
+            # Apply gradient norm clipping if threshold provided
+            if clip_norm_val is not None:
+                current_norm = torch.norm(v.float())
+                if current_norm > clip_norm_val:
+                    clip_factor = clip_norm_val / current_norm
+                    v = v * clip_factor
+
             # Apply L2 normalization to this individual tensor's values
-            # Normalize along the last dimension (where top-k was selected)
-            if normalise:
+            elif normalise:
                 eps = 1e-8
                 if len(v.shape) == 3:  # 2D weights
                     l2_norm = torch.norm(v, p=2, dim=2, keepdim=True)
