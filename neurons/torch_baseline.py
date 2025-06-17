@@ -236,6 +236,10 @@ class AdamBaseline:
                             help='Use sign for outer optimizer')
         parser.add_argument('--outer_optimizer', type=str, default='demo', choices=['adamw', 'demo', 'nesterov'],
                             help='Outer optimizer to use for training (adamw or demo or nesterov)')
+        parser.add_argument('--safety_grad_clip_min', type=float, default=-100,
+                            help='Safety lower bound for median gradient norm clipping (prevents anomalously low norms)')
+        parser.add_argument('--safety_grad_clip_max', type=float, default=100,
+                            help='Safety upper bound for median gradient norm clipping (prevents anomalously high norms)')
         
         # DeMo specific args
         parser.add_argument('--compression_decay', type=float, default=0.999,
@@ -513,6 +517,8 @@ class AdamBaseline:
                 quantization_range=self.config.quantization_range,
                 use_sign=bool(self.config.outer_use_sign),
                 grad_val_multiplier=self.config.grad_val_multiplier,
+                safety_grad_clip_min=self.config.safety_grad_clip_min,
+                safety_grad_clip_max=self.config.safety_grad_clip_max,
                 process_group=dist.group.WORLD if self.world_size > 1 else None
             )
         elif self.config.outer_optimizer.lower() == 'adamw':

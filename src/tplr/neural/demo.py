@@ -15,6 +15,8 @@ import torch.distributed as dist
 from einops import rearrange
 from typing import Optional, Callable
 
+import tplr
+
 class DeMo(torch.optim.SGD):
     def __init__(
         self,
@@ -32,7 +34,8 @@ class DeMo(torch.optim.SGD):
         quantization_bins: int = 256,
         quantization_range: int = 6,
         process_group: Optional[dist.ProcessGroup] = None,
-        clip_controlled_max: float = 15.0,  
+        safety_grad_clip_min: float = -100.0,  
+        safety_grad_clip_max: float = 100.0,  
         **kwargs,
     ):
         super().__init__(
@@ -45,7 +48,13 @@ class DeMo(torch.optim.SGD):
             weight_decay=0.0,
             **kwargs,
         )
-
+        if safety_grad_clip_max < 100: 
+            use_grad_normalization = False
+            tplr.logger.warning(
+                f"Disabling gradient normalization because safety_grad_clip_max ({safety_grad_clip_max}) < 800. "
+                "Safety clipping and gradient normalization cannot be used together."
+            )
+        
         self.compression_decay = compression_decay
         self.compression_chunk = compression_chunk
         self.compression_topk = compression_topk
@@ -55,7 +64,8 @@ class DeMo(torch.optim.SGD):
         self.use_grad_normalization = use_grad_normalization
         self.use_quantization = use_quantization
         self.grad_val_multiplier = grad_val_multiplier
-        self.clip_controlled_max = clip_controlled_max
+        self.safety_grad_clip_min = safety_grad_clip_min
+        self.safety_grad_clip_max = safety_grad_clip_max
 
         if self.compression_topk <= 0:
             raise ValueError("topk_size has to be positive")
@@ -123,6 +133,7 @@ class DeMo(torch.optim.SGD):
         self.data_transmit = 0
         self.data_receive = 0
 
+        _logged_clamp = False
         for group in self.param_groups:
             lr = group["lr"]
             for p in group["params"]:
@@ -175,12 +186,19 @@ class DeMo(torch.optim.SGD):
                 stacked_norms = torch.stack(worker_norms)
                 median_norm = torch.median(stacked_norms)
                 
-                # Convert clip_controlled_max to tensor and use torch.max for proper comparison
-                clip_thresh = torch.max(
-                    torch.tensor(self.clip_controlled_max, device=median_norm.device, dtype=median_norm.dtype), 
-                    median_norm
+                # Clamp median_norm between safety bounds to prevent anomalous workers
+                clip_thresh = torch.clamp(
+                    median_norm,
+                    min=self.safety_grad_clip_min,
+                    max=self.safety_grad_clip_max
                 )
-                
+                if not _logged_clamp and clip_thresh != median_norm and clip_thresh.device.index == 0:
+                    _logged_clamp = True # avoid spams
+                    tplr.logger.warning(
+                        f"Median norm of gradients across workers: {median_norm:.2f}, "
+                        f"Clipping threshold set to: {clip_thresh:.2f}."
+                    )
+
                 # Decode grad from all nodes with clipping
                 new_grad = self.transform.decode(
                     self.compress.batch_decompress(
@@ -190,7 +208,7 @@ class DeMo(torch.optim.SGD):
                         xshape, 
                         totalk, 
                         quant_params_local,
-                        normalise=False,  # Disable old normalization
+                        normalise=self.use_grad_normalization,  # Disable old normalization
                         clip_norm_val=clip_thresh  # Use clipping threshold
                     )
                 )
@@ -394,15 +412,9 @@ class CompressDCT:
             if self.use_quantization and quantize_params and i < len(quantize_params):
                 v = self._dequantize_values(v, quantize_params[i])
 
-            # Apply gradient norm clipping if threshold provided
-            if clip_norm_val is not None:
-                current_norm = torch.norm(v.float())
-                if current_norm > clip_norm_val:
-                    clip_factor = clip_norm_val / current_norm
-                    v = v * clip_factor
 
             # Apply L2 normalization to this individual tensor's values
-            elif normalise:
+            if normalise:
                 eps = 1e-8
                 if len(v.shape) == 3:  # 2D weights
                     l2_norm = torch.norm(v, p=2, dim=2, keepdim=True)
@@ -414,6 +426,12 @@ class CompressDCT:
                     l2_norm = torch.norm(v, p=2)
                     if l2_norm > eps:
                         v = v / l2_norm
+            # Apply gradient norm clipping if threshold provided
+            elif clip_norm_val is not None:
+                current_norm = torch.norm(v.float())
+                if current_norm > clip_norm_val:
+                    clip_factor = clip_norm_val / current_norm
+                    v = v * clip_factor
 
             processed_vals.append(v)
 
