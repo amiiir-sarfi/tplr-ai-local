@@ -178,13 +178,8 @@ class DeMo(torch.optim.SGD):
                     self.data_receive += si.nbytes + v.nbytes
 
                 # Calculate worker norms and derive clipping threshold
-                worker_norms = []
-                for sparse_vals in sparse_val_gather:
-                    # Norm of sparse values from each worker (handle quantized uint8)
-                    worker_norms.append(torch.norm(sparse_vals.float()))
-            
-                stacked_norms = torch.stack(worker_norms)
-                median_norm = torch.median(stacked_norms)
+                worker_norms = torch.stack([torch.norm(sparse_vals, dim=1, p=2) for sparse_vals in sparse_val_gather], dim=1)
+                median_norm = torch.median(worker_norms)
                 
                 # Clamp median_norm between safety bounds to prevent anomalous workers
                 clip_thresh = torch.clamp(
