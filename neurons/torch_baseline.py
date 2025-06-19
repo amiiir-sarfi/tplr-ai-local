@@ -637,7 +637,7 @@ class AdamBaseline:
                 break
                 
             if self.global_rank == 0:
-                tplr.logger.info(f"\n{'-' * 40} Window: {window} {'-' * 40}")
+                tplr.logger.info(f"\n{'-' * 40} Window: {window}/{self.config.max_steps} {'-' * 40}")
                 if self.config.debug:
                     self.log_timing(f"Window {window} - Starting gradient accumulation")
             
