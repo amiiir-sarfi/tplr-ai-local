@@ -178,7 +178,7 @@ class DeMo(torch.optim.SGD):
                     self.data_receive += si.nbytes + v.nbytes
 
                 # Calculate worker norms and derive clipping threshold
-                worker_norms = torch.stack([torch.norm(sparse_vals, dim=1, p=2) for sparse_vals in sparse_val_gather], dim=1)
+                worker_norms = torch.stack([torch.norm(sparse_vals, p=2) for sparse_vals in sparse_val_gather])
                 median_norm = torch.median(worker_norms)
                 
                 # Clamp median_norm between safety bounds to prevent anomalous workers
