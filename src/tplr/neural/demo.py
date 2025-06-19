@@ -204,7 +204,8 @@ class DeMo(torch.optim.SGD):
                         totalk, 
                         quant_params_local,
                         normalise=self.use_grad_normalization,  # Disable old normalization
-                        clip_norm_val=clip_thresh  # Use clipping threshold
+                        clip_norm_val=clip_thresh,  # Use clipping threshold
+                        current_norm=worker_norms[worker_norms.device.index]
                     )
                 )
 
@@ -382,7 +383,7 @@ class CompressDCT:
 
     @torch.no_grad()
     def batch_decompress(
-        self, p, idx, val, xshape, totalk, quantize_params=None, normalise=True, clip_norm_val=None
+        self, p, idx, val, xshape, totalk, quantize_params=None, normalise=True, clip_norm_val=None, current_norm=None
     ):
         """
         Decompress multiple tensors in batch mode with optional gradient norm clipping.
@@ -423,10 +424,8 @@ class CompressDCT:
                         v = v / l2_norm
             # Apply gradient norm clipping if threshold provided
             elif clip_norm_val is not None:
-                current_norm = torch.norm(v.float())
-                if current_norm > clip_norm_val:
-                    clip_factor = clip_norm_val / current_norm
-                    v = v * clip_factor
+                norm_mult = torch.clamp(clip_norm_val/current_norm, max=1)
+                v = v * norm_mult
 
             processed_vals.append(v)
 
