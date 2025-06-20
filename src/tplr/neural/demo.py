@@ -159,8 +159,6 @@ class DeMo(torch.optim.SGD):
                 sparse_idx, sparse_val, xshape, totalk, quant_params_local = self.compress.compress(
                     self.transform.encode(state["delta"]), self.compression_topk
                 )
-                sparse_val *= self.grad_val_multiplier
-
                 # Estimate transmitted delta
                 transmit_grad = self.transform.decode(
                     self.compress.decompress(p, sparse_idx, sparse_val, xshape, totalk, quant_params_local)
@@ -168,6 +166,10 @@ class DeMo(torch.optim.SGD):
 
                 # Remove transmitted from delta
                 state["delta"].sub_(transmit_grad)
+
+                # Anomaly miners applying a multiplier to the gradient values befor transmission
+                sparse_val *= self.grad_val_multiplier
+
 
                 # All-gather
                 sparse_idx_gather, sparse_val_gather = self._demo_all_gather(sparse_idx, sparse_val)
