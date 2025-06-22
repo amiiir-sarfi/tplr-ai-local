@@ -46,7 +46,6 @@ from torch.optim.lr_scheduler import (
 
 # Local
 import tplr
-import tplr.sharded_dataset
 
 # GPU optimizations
 torch.manual_seed(42)
@@ -248,6 +247,14 @@ class AdamBaseline:
         parser.add_argument('--num_prefetch_batches', type=int, default=0,
                             help='Number of batches to prefetch for data loading')
 
+        # Validation args
+        parser.add_argument('--validation_frequency', type=int, default=50,
+                            help='Run validation every N windows')
+        parser.add_argument('--validation_token_budget', type=int, default=67108864, # 2**15 * 2048
+                            help='Maximum tokens to use for validation')
+        parser.add_argument('--validation_batch_multiplier', type=int, default=1,
+                            help='Multiplier for validation batch size (validation_bs = micro_batch_size * multiplier)')
+
         # Checkpoint args
         parser.add_argument('--save_path', type=str, default='./checkpoints', 
                             help='Path to save model checkpoints')
@@ -441,6 +448,42 @@ class AdamBaseline:
             split="train",
             reside_in_gpu=self.config.data_in_gpu
         )
+        
+        # Initialize validation dataset (only on rank 0)
+        if self.global_rank == 0:
+            # try:
+                # Load entire validation dataset without assuming specific shard size
+                val_dataset = tplr.sharded_dataset.ShardedGPUDataset(
+                    shards_path=os.path.expandvars(os.path.expanduser(self.config.shards_path)),
+                    token_budget=self.config.validation_token_budget, 
+                    sequence_length=self.config.sequence_length,
+                    rank=0,  
+                    world_size=1, 
+                    device=self.device,
+                    shard_token_size=self.config.shard_token_size, 
+                    split="validation",
+                    reside_in_gpu=self.config.data_in_gpu
+                )
+                
+                # Use larger batch size for validation
+                validation_batch_size = self.config.micro_batch_size * self.config.validation_batch_multiplier
+                
+                self.val_loader = tplr.get_sharded_gpu_dataloader(
+                    val_dataset,
+                    batch_size=validation_batch_size,
+                    shuffle=False,  # No need to shuffle validation
+                    num_workers=self.config.num_workers,
+                    num_prefetch_batches=self.config.num_prefetch_batches
+                )
+                
+                tplr.logger.info(f"Validation dataset initialized with {len(val_dataset)} samples, "
+                               f"batch_size={validation_batch_size}")
+                
+            # except Exception as e:
+            #     tplr.logger.warning(f"Failed to initialize validation dataset: {e}. Validation will be skipped.")
+            #     self.val_loader = None
+        else:
+            self.val_loader = None
         
         if self.global_rank == 0:
             # Log memory after dataset creation
@@ -640,6 +683,58 @@ class AdamBaseline:
         if self.global_rank == 0 and self.timing_logger is not None:
             self.timing_logger.info(message)
             
+    def _validate(self):
+        """Run validation on the validation set (rank 0 only)."""
+        if self.global_rank != 0 or self.val_loader is None:
+            return {}
+        
+        tplr.logger.info("Running validation...")
+        
+        # Get the underlying model (unwrap DDP if needed)
+        model_to_eval = self.model.module if isinstance(self.model, DDP) else self.model
+        model_to_eval.eval()
+        
+        total_val_loss = 0.0
+        total_val_tokens = 0
+        num_val_batches = 0
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(self.val_loader):
+                batch = batch.to(self.device)
+                
+                # Forward pass
+                outputs = model_to_eval(batch, labels=batch)
+                loss = outputs.loss
+                
+                # Accumulate metrics
+                batch_tokens = batch.numel()
+                total_val_loss += loss.item() * batch_tokens
+                total_val_tokens += batch_tokens
+                num_val_batches += 1
+                
+                # Check if we've hit the validation token budget
+                if total_val_tokens >= self.config.validation_token_budget:
+                    tplr.logger.info(f"Validation token budget ({self.config.validation_token_budget:,}) reached. "
+                                   f"Processed {total_val_tokens:,} tokens in {num_val_batches} batches.")
+                    break
+        
+        # Calculate average validation loss
+        avg_val_loss = total_val_loss / total_val_tokens if total_val_tokens > 0 else 0.0
+        val_perplexity = torch.exp(torch.tensor(avg_val_loss)).item()
+        
+        # Switch back to training mode
+        model_to_eval.train()
+        
+        tplr.logger.info(f"Validation completed: loss={avg_val_loss:.4f}, perplexity={val_perplexity:.2f}, "
+                        f"batches={num_val_batches}, tokens={total_val_tokens}")
+        
+        return {
+            "validation/loss": avg_val_loss,
+            "validation/perplexity": val_perplexity,
+            "validation/tokens": total_val_tokens,
+            "validation/batches": num_val_batches
+        }
+
     async def run(self):
         """Main training loop."""
         for window in range(self.window_step, self.config.max_steps):
@@ -690,6 +785,13 @@ class AdamBaseline:
                 # Use strategy for outer step
                 with Timer("outer_step"):
                     self.strategy.outer_step(self.model, self.outer_optimizer, self.scheduler)
+            
+            # Run validation based on configured frequency (only on rank 0)
+            val_metrics = {}
+            if window % self.config.validation_frequency == 0: #and window > 0:
+                with Timer("validation"):
+                    tplr.logger.info(f"Window {window}: Validation start ...")
+                    val_metrics = self._validate()
             
             if self.global_rank == 0:
                 # Calculate tokens per second
@@ -755,6 +857,10 @@ class AdamBaseline:
                     "gradient/grad_to_weight_ratio": (sum(grad_norms) / len(grad_norms)) / (sum(weight_norms) / len(weight_norms)) if grad_norms and weight_norms else 0,
                     
                 }
+                
+                # Add validation metrics if available
+                if val_metrics:
+                    metrics_dict.update(val_metrics)
                 
                 # Add optimizer-specific learning rates
                 if self.config.strategy.lower() == "diloco" and self.inner_optimizer:

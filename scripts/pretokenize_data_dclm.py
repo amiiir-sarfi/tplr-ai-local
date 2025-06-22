@@ -9,21 +9,51 @@ import multiprocessing as mp
 from multiprocessing import Manager, Process
 import time
 import sys
+import argparse
 
-seq_len = 2048
-batch_size = 6
-max_iterations = 3000
-workers = 8
-pages_per_window = 6
-tokenizer_name = "togethercomputer/LLaMA-2-7B-32K"
-seed = "adam_baseline"
-shard_size = int(50e6)  # 50M tokens per shard
-output_dir = "~/datasets/dclm_tokenized_llama2"
+def parse_args():
+    parser = argparse.ArgumentParser(description="Pretokenize DCLM dataset")
+    parser.add_argument("--seq_len", type=int, default=2048, help="Sequence length")
+    parser.add_argument("--batch_size", type=int, default=6, help="Batch size")
+    parser.add_argument("--max_iterations", type=int, default=3000, help="Maximum iterations")
+    parser.add_argument("--workers", type=int, default=8, help="Number of workers")
+    parser.add_argument("--pages_per_window", type=int, default=6, help="Pages per window")
+    parser.add_argument("--tokenizer_name", type=str, default="togethercomputer/LLaMA-2-7B-32K", help="Tokenizer name")
+    parser.add_argument("--seed", type=str, default="adam_baseline", help="Random seed")
+    parser.add_argument("--shard_size", type=int, default=int(100e6), help="Shard size in tokens")
+    parser.add_argument("--output_dir", type=str, default="~/datasets/dclm_tokenized_llama2_validation", help="Output directory")
+    parser.add_argument("--validation_offset", type=int, default=-1, help="Validation offset")
+    parser.add_argument("--num_processes", type=int, default=None, help="Number of processes (auto-detect if not specified)")
+    return parser.parse_args()
 
+args = parse_args()
+
+seq_len = args.seq_len
+batch_size = args.batch_size
+max_iterations = args.max_iterations
+workers = args.workers
+pages_per_window = args.pages_per_window
+tokenizer_name = args.tokenizer_name
+seed = args.seed
+shard_size = args.shard_size
+output_dir = args.output_dir
+validation_offset = args.validation_offset
+
+validation_offset = max(0, validation_offset)
+training = not (validation_offset > 0)
+if not training:
+    print(f"Warning: Validation offset is HARDCODED to {validation_offset} for reproducability.")
+    validation_offset = 5500 # Hardcoded to ensure reproducability
+    max_iterations = 17
+shard_prefix = "train_" if training else "validation_"
 # Auto-detect optimal number of processes
+
 cpu_count = mp.cpu_count()
-num_processes = max(1, int(cpu_count * 0.75))
-print(f"Detected {cpu_count} CPU cores, using {num_processes} processes")
+if training:
+    num_processes = max(1, int(cpu_count * 0.75))
+else:
+    num_processes = 1  # For validation, use a single process
+print(f"Detected {cpu_count} CPU cores, using {num_processes} processes for {shard_prefix} data")
 
 async def process_worker_async(process_id, start_window, end_window, output_path, shared_shard_counter, shard_counter_lock, progress_queue):
     """Async worker function for a single process"""
@@ -45,10 +75,11 @@ async def process_worker_async(process_id, start_window, end_window, output_path
             
             try:
                 pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                    offset=step_window * pages_per_window,
+                    offset=step_window * pages_per_window + validation_offset,
                     n_pages=pages_per_window,
                     seed=seed,
                 )
+
                 loader = await tplr.r2_dataset.R2DatasetLoader.create(
                     batch_size=batch_size,
                     sequence_length=seq_len,
@@ -82,8 +113,8 @@ async def process_worker_async(process_id, start_window, end_window, output_path
                             with shard_counter_lock:
                                 shard_idx = shared_shard_counter.value
                                 shared_shard_counter.value += 1
-                            
-                            shard_filename = os.path.join(output_path, f"train_{shard_idx:06d}.npy")
+
+                            shard_filename = os.path.join(output_path, f"{shard_prefix}{shard_idx:06d}.npy")
                             np.save(shard_filename, shard_buffer.copy())
                             
                             progress_queue.put(f"Process {process_id}: Saved shard {shard_idx} with {shard_size/1e6:.1f}M tokens")
@@ -105,8 +136,8 @@ async def process_worker_async(process_id, start_window, end_window, output_path
         with shard_counter_lock:
             shard_idx = shared_shard_counter.value
             shared_shard_counter.value += 1
-        
-        final_shard_filename = os.path.join(output_path, f"train_{shard_idx:06d}.npy")
+
+        final_shard_filename = os.path.join(output_path, f"{shard_prefix}{shard_idx:06d}.npy")
         np.save(final_shard_filename, shard_buffer[:tokens_in_buffer])
         progress_queue.put(f"Process {process_id}: Saved final shard {shard_idx} with {tokens_in_buffer/1e6:.1f}M tokens")
     

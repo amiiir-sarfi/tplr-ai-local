@@ -24,7 +24,7 @@ class ShardedGPUDataset(Dataset):
                  world_size: int,
                  device: torch.device,
                  shard_token_size: int = 100_000_000, # Expected tokens per .npy shard
-                 split: Literal["train"] = "train", # only supports "train" for now
+                 split: Literal["train", "validation"] = "train", # "train", "validation"
                  reside_in_gpu: bool = False):
         """
         Args:
@@ -36,9 +36,14 @@ class ShardedGPUDataset(Dataset):
             device (torch.device): The CUDA device for this rank (e.g., torch.device("cuda:0")).
             shard_token_size (int): Expected number of tokens in each .npy shard file.
                                     Used to calculate how many shards to load for the budget.
-            split (str): Train test split to load data (e.g., "train").
+            split (str): Train test split to load data ("train" or "validation").
         """
         super().__init__()
+        
+        # Validate split parameter
+        if split not in ["train", "validation"]:
+            raise ValueError(f"Invalid split '{split}'. Must be either 'train' or 'validation'.")
+        
         self.shards_path = Path(shards_path)
         self.token_budget = token_budget
         self.sequence_length = sequence_length
@@ -58,6 +63,7 @@ class ShardedGPUDataset(Dataset):
             raise FileNotFoundError(f"No shard files found with prefix '{self.shard_filename_prefix}' in {self.shards_path}")
 
         # 2. Calculate how many shards to load
+        tplr.logger.info(f"self.token_budget: {self.token_budget}, self.shard_token_size: {self.shard_token_size}")
         num_shards_to_load = math.ceil(self.token_budget / self.shard_token_size)
         
         if num_shards_to_load > len(shard_files):
