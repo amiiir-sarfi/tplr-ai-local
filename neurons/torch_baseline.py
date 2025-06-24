@@ -248,6 +248,8 @@ class AdamBaseline:
                             help='Compression topk for DeMo optimizer')
         parser.add_argument('--compression_chunk', type=int, default=64,
                             help='Compression chunk size for DeMo optimizer')
+        parser.add_argument('--use_dct', type=int, default=1, choices=[0, 1],
+                            help='Use DCT transform in DeMo optimizer (0=False, 1=True)')
         parser.add_argument('--use_grad_normalization', action='store_true',
                             help='Use gradient normalization for DeMo optimizer')
         parser.add_argument('--use_quantization', action='store_true',
@@ -511,6 +513,7 @@ class AdamBaseline:
                 compression_decay=self.config.compression_decay,
                 compression_topk=self.config.compression_topk,
                 compression_chunk=self.config.compression_chunk,
+                use_dct=bool(self.config.use_dct),
                 use_grad_normalization=self.config.use_grad_normalization,
                 use_quantization=self.config.use_quantization,
                 quantization_bins=self.config.quantization_bins,

@@ -28,6 +28,7 @@ class DeMo(torch.optim.SGD):
         nesterov: bool = False,
         weight_decay: float = 0.0,
         use_sign: bool = False,
+        use_dct: bool = True,
         grad_val_multiplier: float = 1.0,
         use_grad_normalization: bool = False,
         use_quantization: bool = False,
@@ -66,6 +67,7 @@ class DeMo(torch.optim.SGD):
         self.grad_val_multiplier = grad_val_multiplier
         self.safety_grad_clip_min = safety_grad_clip_min
         self.safety_grad_clip_max = safety_grad_clip_max
+        self.use_dct = use_dct
 
         if self.compression_topk <= 0:
             raise ValueError("topk_size has to be positive")
@@ -157,11 +159,11 @@ class DeMo(torch.optim.SGD):
 
                 # Compress delta
                 sparse_idx, sparse_val, xshape, totalk, quant_params_local = self.compress.compress(
-                    self.transform.encode(state["delta"]), self.compression_topk
+                    self.transform.encode(state["delta"], self.use_dct), self.compression_topk
                 )
                 # Estimate transmitted delta
                 transmit_grad = self.transform.decode(
-                    self.compress.decompress(p, sparse_idx, sparse_val, xshape, totalk, quant_params_local)
+                    self.compress.decompress(p, sparse_idx, sparse_val, xshape, totalk, quant_params_local), self.use_dct
                 )
 
                 # Remove transmitted from delta
@@ -208,7 +210,8 @@ class DeMo(torch.optim.SGD):
                         normalise=self.use_grad_normalization,  # Disable old normalization
                         clip_norm_val=clip_thresh,  # Use clipping threshold
                         worker_norms=worker_norms
-                    )
+                    ),
+                    use_dct=self.use_dct
                 )
 
                 # Set grad to values
@@ -267,7 +270,7 @@ class TransformDCT:
             return torch.einsum("...ijkl, kb, ld -> ...ibjd", x, b, d)
 
     @torch.no_grad()
-    def encode(self, x):
+    def encode(self, x, use_dct=True):
         if len(x.shape) > 1:  # 2D weights
             n1 = self.shape_dict[x.shape[0]]
             n2 = self.shape_dict[x.shape[1]]
@@ -277,6 +280,8 @@ class TransformDCT:
             self.f_dict[n2] = n2w
 
             x = rearrange(x, "(y h) (x w) -> y h x w", h=n1, w=n2)
+            if not use_dct:
+                return x
             x = self.einsum_2d(x, n1w, n2w)
 
         else:  # 1D weights
@@ -285,29 +290,33 @@ class TransformDCT:
             self.f_dict[n1] = n1w
 
             x = rearrange(x, "(x w) -> x w", w=n1)
+            if not use_dct:
+                return x
             x = self.einsum_2d(x, n1w)
 
         return x
 
     @torch.no_grad()
-    def decode(self, x):
+    def decode(self, x, use_dct=True):
         if len(x.shape) > 2:  # 2D weights
-            n1 = x.shape[2]
-            n2 = x.shape[3]
-            n1w = self.b_dict[n1].to(x.device)
-            n2w = self.b_dict[n2].to(x.device)
-            self.b_dict[n1] = n1w
-            self.b_dict[n2] = n2w
+            if use_dct:
+                n1 = x.shape[2]
+                n2 = x.shape[3]
+                n1w = self.b_dict[n1].to(x.device)
+                n2w = self.b_dict[n2].to(x.device)
+                self.b_dict[n1] = n1w
+                self.b_dict[n2] = n2w
+                x = self.einsum_2d_t(x, n1w, n2w)
 
-            x = self.einsum_2d_t(x, n1w, n2w)
             x = rearrange(x, "y h x w -> (y h) (x w)")
 
         else:  # 1D weights
-            n1 = x.shape[1]
-            n1w = self.b_dict[n1].to(x.device)
-            self.b_dict[n1] = n1w
-
-            x = self.einsum_2d_t(x, n1w)
+            if use_dct:
+                n1 = x.shape[1]
+                n1w = self.b_dict[n1].to(x.device)
+                self.b_dict[n1] = n1w
+                x = self.einsum_2d_t(x, n1w)
+                
             x = rearrange(x, "x w -> (x w)")
 
         return x
