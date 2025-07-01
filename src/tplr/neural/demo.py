@@ -117,8 +117,8 @@ class DeMo(torch.optim.SGD):
         world_size = dist.get_world_size() if self.process_group is None else self.process_group.size()
 
         # Gather all the idx and vals
-        sparse_idx_list = [torch.zeros_like(sparse_idx) for wi in range(world_size)]
-        sparse_val_list = [torch.zeros_like(sparse_val) for wi in range(world_size)]
+        sparse_idx_list = [torch.zeros_like(sparse_idx) for _ in range(world_size)]
+        sparse_val_list = [torch.zeros_like(sparse_val) for _ in range(world_size)]
 
         sparse_idx_handle = dist.all_gather(sparse_idx_list, sparse_idx, group=self.process_group, async_op=True)
         sparse_val_handle = dist.all_gather(sparse_val_list, sparse_val, group=self.process_group, async_op=True)
@@ -169,20 +169,56 @@ class DeMo(torch.optim.SGD):
                 # Remove transmitted from delta
                 state["delta"].sub_(transmit_grad)
 
-                # Anomaly miners applying a multiplier to the gradient values befor transmission
+                # Anomaly miners applying a multiplier to the gradient values befor transmission (e.g., for research purposes)
                 sparse_val *= self.grad_val_multiplier
 
+                # Gather quantization parameters from all workers if quantization is enabled
+                quant_params_gather = None
+                quant_comm_handle = None
+                if self.use_quantization:
+                    world_size = dist.get_world_size() if self.process_group is None else self.process_group.size()
+                    
+                    # Pack local shift and lookup table into a tensor for communication
+                    shift_local, _, _, lookup_local, _ = quant_params_local
+                    quant_comm_tensor = torch.cat([shift_local.view(1), lookup_local.to(shift_local.device)])
+                    
+                    # All-gather the packed quantization parameters asynchronously
+                    quant_comm_list = [torch.zeros_like(quant_comm_tensor) for _ in range(world_size)]
+                    quant_comm_handle = dist.all_gather(quant_comm_list, quant_comm_tensor, group=self.process_group, async_op=True)
 
-                # All-gather
+                # All-gather indices and values
                 sparse_idx_gather, sparse_val_gather = self._demo_all_gather(sparse_idx, sparse_val)
+                
+                # Wait for quantization param gathering to finish and reconstruct params
+                if self.use_quantization:
+                    quant_comm_handle.wait()
+                    quant_params_gather = []
+                    # Unpack the gathered tensors back into quantization parameter tuples
+                    for i in range(world_size):
+                        shift_i = quant_comm_list[i][0].unsqueeze(0)
+                        lookup_i = quant_comm_list[i][1:]
+                        _, scale_local, offset_local, _, dtype_local = quant_params_local
+                        params_i = (shift_i, scale_local, offset_local, lookup_i, dtype_local)
+                        quant_params_gather.append(params_i)
+
+                # Dequantize values from all workers BEFORE calculating norms
+                dequant_val_gather = sparse_val_gather
+                if self.use_quantization:
+                    dequant_val_gather = [
+                        self.compress._dequantize_values(v, quant_params_gather[i])
+                        for i, v in enumerate(sparse_val_gather)
+                    ]
 
                 # Log I/O data size
                 self.data_transmit += sparse_idx.nbytes + sparse_val.nbytes
                 for si, v in zip(sparse_idx_gather, sparse_val_gather):
                     self.data_receive += si.nbytes + v.nbytes
+                if self.use_quantization:
+                    self.data_transmit += quant_comm_tensor.nbytes
+                    self.data_receive += sum(t.nbytes for t in quant_comm_list)
 
-                # Calculate worker norms and derive clipping threshold
-                worker_norms = torch.stack([torch.norm(sparse_vals, p=2) for sparse_vals in sparse_val_gather])
+                # Calculate worker norms on DEQUANTIZED values and derive clipping threshold
+                worker_norms = torch.stack([torch.norm(sparse_vals, p=2) for sparse_vals in dequant_val_gather])
                 median_norm = torch.median(worker_norms)
                 
                 # Clamp median_norm between safety bounds to prevent anomalous workers
@@ -203,12 +239,11 @@ class DeMo(torch.optim.SGD):
                     self.compress.batch_decompress(
                         p, 
                         sparse_idx_gather, 
-                        sparse_val_gather, 
+                        dequant_val_gather,
                         xshape, 
                         totalk, 
-                        quant_params_local,
-                        normalise=self.use_grad_normalization,  # Disable old normalization
-                        clip_norm_val=clip_thresh,  # Use clipping threshold
+                        normalise=self.use_grad_normalization,
+                        clip_norm_val=clip_thresh,
                         worker_norms=worker_norms
                     ),
                     use_dct=self.use_dct
@@ -370,12 +405,13 @@ class CompressDCT:
 
         return idx, val, xshape, totalk, quant_params
 
+    # --- MODIFICATION: RESTORE THIS METHOD ---
     @torch.no_grad()
     def decompress(self, p, idx, val, xshape, totalk, quantize_params=None):
         # Dequantize if values were quantized
         if self.use_quantization and quantize_params is not None:
             val = self._dequantize_values(val, quantize_params)
-
+            
         x = torch.zeros(xshape, device=p.device, dtype=p.dtype)
 
         if len(xshape) > 2:  # 2D weights
@@ -391,10 +427,11 @@ class CompressDCT:
             x = rearrange(x, "y x (h w) -> y x h w", h=xshape[2])
 
         return x
+    # --- END MODIFICATION ---
 
     @torch.no_grad()
     def batch_decompress(
-        self, p, idx, val, xshape, totalk, quantize_params=None, normalise=True, clip_norm_val=None, worker_norms=None
+        self, p, idx, val, xshape, totalk, normalise=True, clip_norm_val=None, worker_norms=None
     ):
         """
         Decompress multiple tensors in batch mode with optional gradient norm clipping.
@@ -405,20 +442,11 @@ class CompressDCT:
         if not isinstance(val, list):
             val = [val]
 
-        # Handle quantization parameters
-        if quantize_params is not None:
-            if not isinstance(quantize_params, list):
-                quantize_params = [quantize_params] * len(val)
-
-        # Process values - dequantize and apply clipping if needed
+        # Process values - apply clipping if needed.
+        # NOTE: Dequantization is now handled *before* this function is called.
         processed_vals = []
         for i in range(len(val)):
             v = val[i].to(p.device)
-
-            # Dequantize if we have quantization parameters
-            if self.use_quantization and quantize_params and i < len(quantize_params):
-                v = self._dequantize_values(v, quantize_params[i])
-
 
             eps = 1e-8
             # Apply L2 normalization to this individual tensor's values
@@ -446,9 +474,10 @@ class CompressDCT:
 
         # Use decompress without quantization (since we already dequantized)
         return self.decompress(
-            p, idx_concat, val_concat, xshape, totalk, quantize_params=None
+            p, idx_concat, val_concat, xshape, totalk, quantize_params=None # Pass None here
         )
 
+    # ... (the rest of your CompressDCT class is correct) ...
     @torch.no_grad()
     def _quantize_values(self, val):
         """
@@ -475,12 +504,12 @@ class CompressDCT:
 
         # Ensure scale is not zero to avoid NaN
         if scale == 0 or torch.isnan(scale) or torch.isinf(scale):
-            scale = 1.0
+            scale = torch.tensor(1.0, dtype=centered_val.dtype, device=val.device)
 
         # Quantize to 8-bit representation
-        centered_val = centered_val.to(torch.float32)
+        centered_val_fp32 = centered_val.to(torch.float32)
         quantized_val = (
-            (centered_val / scale + offset)
+            (centered_val_fp32 / scale + offset)
             .round()
             .clamp(0, self.n_bins - 1)
             .to(torch.uint8)
@@ -491,16 +520,16 @@ class CompressDCT:
         sums = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
         counts = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
 
-        sums.scatter_add_(0, quantized_val.flatten().long(), centered_val.flatten())
+        sums.scatter_add_(0, quantized_val.flatten().long(), centered_val_fp32.flatten())
         counts.scatter_add_(
-            0, quantized_val.flatten().long(), torch.ones_like(centered_val.flatten())
+            0, quantized_val.flatten().long(), torch.ones_like(centered_val_fp32.flatten())
         )
 
         lookup = torch.where(counts > 0, sums / counts, torch.zeros_like(sums))
 
         # Store quantization parameters for dequantization
         orig_dtype = val.dtype
-        quant_params = (shift, scale, offset, lookup, orig_dtype)
+        quant_params = (shift, float(scale), offset, lookup, orig_dtype)
 
         return quantized_val, quant_params
 
@@ -525,14 +554,36 @@ class CompressDCT:
         if isinstance(lookup, torch.Tensor):
             lookup = lookup.to(val.device)
 
-        # Convert quantized values back using lookup table
-        dequantized = lookup[val.long()]
+        # Dequantize using the lookup table and add back the shift
+        dequantized = lookup[val.long()] + shift
 
-        # Apply scale and shift to get back original distribution
-        val = dequantized + shift
-        val = val.to(orig_dtype)
+        return dequantized.to(orig_dtype)
 
-        return val
+    @torch.no_grad()
+    def _dequantize_values(self, val, quant_params):
+        """
+        Dequantize 8-bit values back to original representation
+
+        Args:
+            val: Quantized uint8 tensor
+            quant_params: Tuple of (shift, scale, offset, lookup, orig_dtype)
+
+        Returns:
+            Dequantized tensor in original dtype
+        """
+        if quant_params is None:
+            return val
+
+        shift, scale, offset, lookup, orig_dtype = quant_params
+
+        # Ensure lookup is on the same device as val
+        if isinstance(lookup, torch.Tensor):
+            lookup = lookup.to(val.device)
+
+        # Dequantize using the lookup table and add back the shift
+        dequantized = lookup[val.long()] + shift
+
+        return dequantized.to(orig_dtype)
 
 
 # Code modified and sourced from https://github.com/zh217/torch-dct
