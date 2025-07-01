@@ -451,48 +451,33 @@ class AdamBaseline:
             reside_in_gpu=self.config.data_in_gpu
         )
         
-        # Initialize validation dataset (only on rank 0)
-        if self.global_rank == 0:
-            # try:
-                # Load entire validation dataset without assuming specific shard size
-                val_dataset = tplr.sharded_dataset.ShardedGPUDataset(
-                    shards_path=os.path.expandvars(os.path.expanduser(self.config.shards_path)),
-                    token_budget=self.config.validation_token_budget, 
-                    sequence_length=self.config.sequence_length,
-                    rank=0,  
-                    world_size=1, 
-                    device=self.device,
-                    shard_token_size=self.config.shard_token_size, 
-                    split="validation",
-                    reside_in_gpu=self.config.data_in_gpu
-                )
-                
-                # Use larger batch size for validation
-                validation_batch_size = self.config.micro_batch_size * self.config.validation_batch_multiplier
-                
-                self.val_loader = tplr.get_sharded_gpu_dataloader(
-                    val_dataset,
-                    batch_size=validation_batch_size,
-                    shuffle=False,  # No need to shuffle validation
-                    num_workers=self.config.num_workers,
-                    num_prefetch_batches=self.config.num_prefetch_batches
-                )
-                
-                tplr.logger.info(f"Validation dataset initialized with {len(val_dataset)} samples, "
-                               f"batch_size={validation_batch_size}")
-                
-            # except Exception as e:
-            #     tplr.logger.warning(f"Failed to initialize validation dataset: {e}. Validation will be skipped.")
-            #     self.val_loader = None
-        else:
-            self.val_loader = None
+        # Initialize validation dataset on all ranks for distributed validation
+        val_dataset = tplr.sharded_dataset.ShardedGPUDataset(
+            shards_path=os.path.expandvars(os.path.expanduser(self.config.shards_path)),
+            token_budget=self.config.validation_token_budget, 
+            sequence_length=self.config.sequence_length,
+            rank=self.global_rank,  # Each rank gets its portion
+            world_size=self.world_size,  # Distribute across all ranks
+            device=self.device,
+            shard_token_size=self.config.shard_token_size, 
+            split="validation",
+            reside_in_gpu=self.config.data_in_gpu
+        )
+        
+        # Use larger batch size for validation
+        validation_batch_size = self.config.micro_batch_size * self.config.validation_batch_multiplier
+        
+        self.val_loader = tplr.get_sharded_gpu_dataloader(
+            val_dataset,
+            batch_size=validation_batch_size,
+            shuffle=False,  # No need to shuffle validation
+            num_workers=self.config.num_workers,
+            num_prefetch_batches=self.config.num_prefetch_batches
+        )
         
         if self.global_rank == 0:
-            # Log memory after dataset creation
-            ram_after = psutil.virtual_memory()
-            tplr.logger.info(f"RAM after dataset creation: {ram_after.used / 1024**3:.2f}GB used, "
-                           f"{ram_after.available / 1024**3:.2f}GB available, "
-                           f"delta: +{(ram_after.used - ram_before.used) / 1024**3:.2f}GB")
+            tplr.logger.info(f"Validation dataset initialized with {len(val_dataset)} samples per rank, "
+                           f"batch_size={validation_batch_size}")
         
         # prefetch_batches = self.config.inner_steps if self.config.strategy.lower() == "diloco" else 2
         self.train_loader = tplr.get_sharded_gpu_dataloader(
@@ -687,11 +672,12 @@ class AdamBaseline:
             self.timing_logger.info(message)
             
     def _validate(self):
-        """Run validation on the validation set (rank 0 only)."""
-        if self.global_rank != 0 or self.val_loader is None:
+        """Run validation on the validation set (all ranks participate)."""
+        if self.val_loader is None:
             return {}
         
-        tplr.logger.info("Running validation...")
+        if self.global_rank == 0:
+            tplr.logger.info("Running distributed validation...")
         
         # Get the underlying model (unwrap DDP if needed)
         model_to_eval = self.model.module if isinstance(self.model, DDP) else self.model
@@ -709,33 +695,50 @@ class AdamBaseline:
                 outputs = model_to_eval(batch, labels=batch)
                 loss = outputs.loss
                 
-                # Accumulate metrics
+                # Accumulate metrics locally
                 batch_tokens = batch.numel()
                 total_val_loss += loss.item() * batch_tokens
                 total_val_tokens += batch_tokens
                 num_val_batches += 1
                 
-                # Check if we've hit the validation token budget
-                if total_val_tokens >= self.config.validation_token_budget:
-                    tplr.logger.info(f"Validation token budget ({self.config.validation_token_budget:,}) reached. "
-                                   f"Processed {total_val_tokens:,} tokens in {num_val_batches} batches.")
+                # Check if we've processed enough tokens for this rank
+                # Note: Each rank processes its portion of the validation budget
+                rank_validation_budget = self.config.validation_token_budget // self.world_size
+                    
+                if total_val_tokens >= rank_validation_budget:
                     break
         
+        # Create tensors for reduction across all ranks
+        local_metrics = torch.tensor(
+            [total_val_loss, total_val_tokens, num_val_batches], 
+            device=self.device, dtype=torch.float64
+        )
+        
+        # All-reduce to sum metrics across all ranks
+        if self.world_size > 1:
+            torch.distributed.all_reduce(local_metrics, op=torch.distributed.ReduceOp.SUM)
+        
+        # Extract reduced values
+        global_total_loss = local_metrics[0].item()
+        global_total_tokens = int(local_metrics[1].item())
+        global_num_batches = int(local_metrics[2].item())
+        
         # Calculate average validation loss
-        avg_val_loss = total_val_loss / total_val_tokens if total_val_tokens > 0 else 0.0
+        avg_val_loss = global_total_loss / global_total_tokens if global_total_tokens > 0 else 0.0
         val_perplexity = torch.exp(torch.tensor(avg_val_loss)).item()
         
         # Switch back to training mode
         model_to_eval.train()
         
-        tplr.logger.info(f"Validation completed: loss={avg_val_loss:.4f}, perplexity={val_perplexity:.2f}, "
-                        f"batches={num_val_batches}, tokens={total_val_tokens}")
+        if self.global_rank == 0:
+            tplr.logger.info(f"Validation completed: loss={avg_val_loss:.4f}, perplexity={val_perplexity:.2f}, "
+                            f"total_batches={global_num_batches}, total_tokens={global_total_tokens}")
         
         return {
             "validation/loss": avg_val_loss,
             "validation/perplexity": val_perplexity,
-            "validation/tokens": total_val_tokens,
-            "validation/batches": num_val_batches
+            "validation/tokens": global_total_tokens,
+            "validation/batches": global_num_batches
         }
 
     async def run(self):
@@ -789,11 +792,10 @@ class AdamBaseline:
                 with Timer("outer_step"):
                     self.strategy.outer_step(self.model, self.outer_optimizer, self.scheduler)
             
-            # Run validation based on configured frequency (only on rank 0)
+            # Run validation based on configured frequency (all ranks participate)
             val_metrics = {}
-            if window % self.config.validation_frequency == 0: #and window > 0:
+            if window % self.config.validation_frequency == 0 or window == self.config.max_steps - 1: #and window > 0:
                 with Timer("validation"):
-                    tplr.logger.info(f"Window {window}: Validation start ...")
                     val_metrics = self._validate()
             
             if self.global_rank == 0:

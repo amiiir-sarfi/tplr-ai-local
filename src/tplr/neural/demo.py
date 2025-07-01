@@ -31,7 +31,7 @@ class DeMo(torch.optim.SGD):
         use_dct: bool = True,
         grad_val_multiplier: float = 1.0,
         use_grad_normalization: bool = False,
-        use_quantization: bool = False,
+        use_quantization: bool = False, # NOTE: With the current lookup-table method, this only saves bandwidth if compression_topk > 1028.
         quantization_bins: int = 256,
         quantization_range: int = 6,
         process_group: Optional[dist.ProcessGroup] = None,
@@ -405,7 +405,6 @@ class CompressDCT:
 
         return idx, val, xshape, totalk, quant_params
 
-    # --- MODIFICATION: RESTORE THIS METHOD ---
     @torch.no_grad()
     def decompress(self, p, idx, val, xshape, totalk, quantize_params=None):
         # Dequantize if values were quantized
@@ -427,7 +426,6 @@ class CompressDCT:
             x = rearrange(x, "y x (h w) -> y x h w", h=xshape[2])
 
         return x
-    # --- END MODIFICATION ---
 
     @torch.no_grad()
     def batch_decompress(
