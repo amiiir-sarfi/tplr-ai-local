@@ -451,33 +451,36 @@ class AdamBaseline:
             reside_in_gpu=self.config.data_in_gpu
         )
         
-        # Initialize validation dataset on all ranks for distributed validation
-        val_dataset = tplr.sharded_dataset.ShardedGPUDataset(
-            shards_path=os.path.expandvars(os.path.expanduser(self.config.shards_path)),
-            token_budget=self.config.validation_token_budget, 
-            sequence_length=self.config.sequence_length,
-            rank=self.global_rank,  # Each rank gets its portion
-            world_size=self.world_size,  # Distribute across all ranks
-            device=self.device,
-            shard_token_size=self.config.shard_token_size, 
-            split="validation",
-            reside_in_gpu=self.config.data_in_gpu
-        )
-        
-        # Use larger batch size for validation
-        validation_batch_size = self.config.micro_batch_size * self.config.validation_batch_multiplier
-        
-        self.val_loader = tplr.get_sharded_gpu_dataloader(
-            val_dataset,
-            batch_size=validation_batch_size,
-            shuffle=False,  # No need to shuffle validation
-            num_workers=self.config.num_workers,
-            num_prefetch_batches=self.config.num_prefetch_batches
-        )
+        self.val_loader = None
+        if self.config.validation_frequency > 0:
+            # Initialize validation dataset on all ranks for distributed validation
+            val_dataset = tplr.sharded_dataset.ShardedGPUDataset(
+                shards_path=os.path.expandvars(os.path.expanduser(self.config.shards_path)),
+                token_budget=self.config.validation_token_budget, 
+                sequence_length=self.config.sequence_length,
+                rank=self.global_rank,  # Each rank gets its portion
+                world_size=self.world_size,  # Distribute across all ranks
+                device=self.device,
+                shard_token_size=self.config.shard_token_size, 
+                split="validation",
+                reside_in_gpu=self.config.data_in_gpu
+            )
+            
+            # Use larger batch size for validation
+            validation_batch_size = self.config.micro_batch_size * self.config.validation_batch_multiplier
+            
+            self.val_loader = tplr.get_sharded_gpu_dataloader(
+                val_dataset,
+                batch_size=validation_batch_size,
+                shuffle=False,  # No need to shuffle validation
+                num_workers=self.config.num_workers,
+                num_prefetch_batches=self.config.num_prefetch_batches
+            )
         
         if self.global_rank == 0:
-            tplr.logger.info(f"Validation dataset initialized with {len(val_dataset)} samples per rank, "
-                           f"batch_size={validation_batch_size}")
+            if self.val_loader:
+                tplr.logger.info(f"Validation dataset initialized with {len(val_dataset)} samples per rank, "
+                            f"batch_size={validation_batch_size}")
         
         # prefetch_batches = self.config.inner_steps if self.config.strategy.lower() == "diloco" else 2
         self.train_loader = tplr.get_sharded_gpu_dataloader(
