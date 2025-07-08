@@ -60,7 +60,7 @@ class SimpleAccum(InnerOuterStrategy):
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     outputs = model(input_ids=input_ids, labels=labels)
                 
-                loss = outputs.loss / self.config.batch_size
+                loss = outputs.loss * current_batch_size / self.config.batch_size
                 loss.backward()
                 
                 total_loss += outputs.loss.item()
