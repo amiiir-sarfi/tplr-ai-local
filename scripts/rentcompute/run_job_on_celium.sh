@@ -110,9 +110,16 @@ REMOTE_COMMAND_SEQUENCE+="chmod +x ${REMOTE_SCRIPT_DEST_ON_SERVER}; bash ${REMOT
 
 if [ -f "$EXPANDED_LOCAL_DATASET_TAR_PATH" ]; then
   echo "Local dataset tarball '$EXPANDED_LOCAL_DATASET_TAR_PATH' found. Copying to remote..."
-  scp -P "$RENTCOMPUTE_POD_PORT" -i "$PRIVATE_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    "$EXPANDED_LOCAL_DATASET_TAR_PATH" \
-    "$RENTCOMPUTE_POD_USER@$RENTCOMPUTE_POD_HOST:~/"
+  
+  # Install rsync on remote server before attempting transfer
+  echo "Installing rsync on remote server..."
+  ssh -p "$RENTCOMPUTE_POD_PORT" -i "$PRIVATE_KEY_PATH" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    "$RENTCOMPUTE_POD_USER@$RENTCOMPUTE_POD_HOST" \
+    "apt update && apt install -y rsync"
+  
+  rsync -avz --stats -e "ssh -p $RENTCOMPUTE_POD_PORT -i $PRIVATE_KEY_PATH -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
+      "$EXPANDED_LOCAL_DATASET_TAR_PATH" \
+      "$RENTCOMPUTE_POD_USER@$RENTCOMPUTE_POD_HOST:~/"
 
   REMOTE_COMMAND_SEQUENCE+="echo 'Extracting ~/dataset.tar into ~/ ...'; "
   REMOTE_COMMAND_SEQUENCE+="tar xf ~/dataset.tar -C ~/; "
@@ -178,7 +185,7 @@ fi
 if [ -n "${RENTCOMPUTE_WANDB_AGENT_LIST:-}" ]; then
   echo "W&B Agent ID list ('$RENTCOMPUTE_WANDB_AGENT_LIST') provided by parent. Will create background script to run agents sequentially."
   REMOTE_COMMAND_SEQUENCE+="echo '--- Post-setup: Launching W\&B Agents Sequentially in Background ---'; "
-  ESCAPED_JOB_EXECUTION_SCRIPT_CONTENT=$(echo "$JOB_EXECUTION_SCRIPT_CONTENT" | sed "s/'/'\\\\''/g")
+  ESCAPED_JOB_EXECUTION_SCRIPT_CONTENT=$(echo "$JOB_EXECUTION_SCRIPT_CONTENT" | sed "s/'/'\''\\\'\''/g")
 
   REMOTE_COMMAND_SEQUENCE+="printf '%s' '$ESCAPED_JOB_EXECUTION_SCRIPT_CONTENT' > ~/run_job_background.sh; "
   REMOTE_COMMAND_SEQUENCE+="chmod +x ~/run_job_background.sh; "

@@ -21,21 +21,7 @@ $SUDO apt-get update -y
 $SUDO apt-get install -y software-properties-common 
 $SUDO apt-get update -y # In case PPA was added (though currently commented out)
 
-$SUDO apt-get install -y \
-    vim \
-    ca-certificates \
-    curl \
-    gnupg \
-    lsb-release \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
-    git \
-    nano \
-    python3-pip \
-    jq \
-    npm \
-    build-essential # For compiling Python packages if needed
+$SUDO apt-get install -y vim ca-certificates curl gnupg lsb-release python3.11 python3.11-venv python3.11-dev git nano python3-pip jq rsync tmux build-essential
 
 # --- (2) NVIDIA driver check & install if missing ---
 echo "Checking for NVIDIA drivers..."
@@ -108,15 +94,7 @@ echo "Verifying NVIDIA and CUDA tools..."
 nvidia-smi || echo "Warning: nvidia-smi command failed. Check NVIDIA driver installation."
 nvcc --version || echo "Warning: nvcc command not found or failed. Check CUDA Toolkit installation and PATH."
 
-# --- (5) System Upgrade & Optional PM2 ---
-echo "Performing system package upgrade (apt-get upgrade)..."
-$SUDO apt-get upgrade -y
-
-echo "Installing pm2 globally via npm..."
-$SUDO npm install -g pm2
-# $SUDO pm2 update # pm2 update might require user interaction or setup
-
-# --- (6) Clone or Update tplr-ai-local repository ---
+# --- (5) Clone or Update tplr-ai-local repository ---
 REPO_URL="https://github.com/amiiir-sarfi/tplr-ai-local"
 CLONE_DIR="$HOME/tplr-ai-local"
 echo "Setting up repository $REPO_URL in $CLONE_DIR..."
@@ -134,7 +112,7 @@ else
   cd "$CLONE_DIR"
 fi
 
-# --- (7) Install uv and Sync Python Environment ---
+# --- (6) Install uv and Sync Python Environment ---
 echo "Ensuring pip and uv are installed/updated for python3.11..."
 python3.11 -m pip install --upgrade pip # Ensure pip is up-to-date for uv
 python3.11 -m pip install uv
@@ -143,7 +121,7 @@ echo "Running 'uv sync' to install Python dependencies from pyproject.toml in $C
 # Ensure we are in the correct directory (cd "$CLONE_DIR" above handles this)
 python3.11 -m uv sync --all-extras
 
-# --- (8) Setup Python venv PATH for future interactive sessions ---
+# --- (7) Setup Python venv PATH for future interactive sessions ---
 VENV_PATH="$CLONE_DIR/.venv"
 VENV_MARKER="TPLR_AI_LOCAL_VENV_PATH_V1"
 if grep -qF "$VENV_MARKER" "$RCFILE"; then
