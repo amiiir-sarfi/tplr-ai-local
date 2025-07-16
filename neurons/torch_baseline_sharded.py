@@ -572,7 +572,7 @@ class AdamBaseline:
                 lr=self.config.outer_learning_rate,
                 weight_decay=self.outer_weight_decay,
                 betas=(0.9, 0.95),
-                eps=0.1
+                eps=0.1 if self.config.strategy.lower() == "diloco" else 1e-8
             )
         elif self.config.outer_optimizer.lower() == 'nesterov':
             self.outer_optimizer = SGD(
